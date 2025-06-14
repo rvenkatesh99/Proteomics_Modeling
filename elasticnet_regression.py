@@ -7,12 +7,15 @@ from sklearn.preprocessing import StandardScaler
 import joblib
 import matplotlib.pyplot as plt
 import os
+import shap
+import seaborn as sns
 
 def run_elasticnet_quantitative(X, y, n_iter, output_prefix, test_size=0.2, random_state=42):
     feature_names = X.columns
     all_metrics = []
     all_preds = []
     all_feature_importances = pd.DataFrame(index=feature_names)
+    all_shap_values = []
 
     for i in range(n_iter):
         print(f'Iteration {i+1}/{n_iter}')
@@ -35,6 +38,11 @@ def run_elasticnet_quantitative(X, y, n_iter, output_prefix, test_size=0.2, rand
         )
         model.fit(X_train_scaled, y_train)
         preds = model.predict(X_test_scaled)
+
+        # Calculate SHAP values
+        explainer = shap.LinearExplainer(model, X_train_scaled)
+        shap_values = explainer.shap_values(X_test_scaled)
+        all_shap_values.append(shap_values)
 
         # Metrics
         r2 = r2_score(y_test, preds)
@@ -70,14 +78,49 @@ def run_elasticnet_quantitative(X, y, n_iter, output_prefix, test_size=0.2, rand
     metrics_df.to_csv(f'{output_prefix}_metrics.csv', index=False)
     predictions_df.to_csv(f'{output_prefix}_predictions.csv', index=False)
 
-    # ▶ Feature Importances: Mean and Std
+    # Feature Importances: Mean and Std
     feature_stats = pd.DataFrame({
         'mean': all_feature_importances.mean(axis=1),
         'std': all_feature_importances.std(axis=1)
     })
     feature_stats.to_csv(f'{output_prefix}_feature_importances_mean_sd.csv')
 
-    # ▶ Plot R² with 95% CI
+    # Calculate mean SHAP values across iterations
+    mean_shap_values = np.mean(all_shap_values, axis=0)
+    mean_shap_importance = np.abs(mean_shap_values).mean(axis=0)
+    shap_importance_df = pd.DataFrame({
+        'feature': feature_names,
+        'mean_shap_value': mean_shap_importance
+    }).sort_values('mean_shap_value', ascending=False)
+    shap_importance_df.to_csv(f'{output_prefix}_shap_importance.csv', index=False)
+
+    # Plot SHAP summary
+    plt.figure(figsize=(10, 6))
+    shap.summary_plot(
+        mean_shap_values,
+        X_test_scaled,
+        feature_names=feature_names,
+        show=False
+    )
+    plt.title('SHAP Feature Importance Summary')
+    plt.tight_layout()
+    plt.savefig(f'{output_prefix}_shap_summary.png')
+    plt.close()
+
+    # Plot top features by SHAP importance
+    plt.figure(figsize=(10, 6))
+    sns.barplot(
+        data=shap_importance_df.head(10),
+        x='mean_shap_value',
+        y='feature'
+    )
+    plt.title('Top 10 Features by SHAP Importance')
+    plt.xlabel('Mean |SHAP value|')
+    plt.tight_layout()
+    plt.savefig(f'{output_prefix}_top_shap_features.png')
+    plt.close()
+
+    # Plot R² with 95% CI
     r2_values = metrics_df['r2'].values
     mean_r2 = np.mean(r2_values)
     std_r2 = np.std(r2_values)
@@ -100,5 +143,6 @@ def run_elasticnet_quantitative(X, y, n_iter, output_prefix, test_size=0.2, rand
     return {
         'metrics': metrics_df,
         'predictions': predictions_df,
-        'feature_stats': feature_stats
+        'feature_stats': feature_stats,
+        'shap_importance': shap_importance_df
     }
