@@ -108,6 +108,7 @@ def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
     
     return best_val_loss.item()
 
+
 def run_pytorch_regression(X, y, n_iter=10, output_prefix='torch_output', test_size=0.2, random_state=42):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -220,7 +221,12 @@ def run_pytorch_regression(X, y, n_iter=10, output_prefix='torch_output', test_s
             background
         )
         shap_values = explainer.shap_values(X_test_scaled)
-        all_shap_values.append(shap_values)
+#         shap_values = np.array(shap_values)  # Ensure it's an ndarray
+        # Handle multi-output SHAP format
+        if isinstance(shap_values, list):
+            shap_values = shap_values[0]  # Assuming single output regression
+
+        all_shap_values.append(shap_values)  # Should now be (n_samples, n_features)
 
         # Permutation importance
         importances = []
@@ -253,10 +259,15 @@ def run_pytorch_regression(X, y, n_iter=10, output_prefix='torch_output', test_s
 
     # Calculate and save mean SHAP values
     mean_shap_values = np.mean(all_shap_values, axis=0)
-    mean_shap_importance = np.abs(mean_shap_values).mean(axis=0)
+    # all_shap_values: list of (n_samples, n_features)
+    all_shap_values_arr = np.stack(all_shap_values, axis=0)  # shape: (n_iter, n_samples, n_features)
+    # Mean absolute SHAP value per feature
+    mean_shap_importance = np.abs(all_shap_values_arr).mean(axis=(0, 1))  # (n_features,)
+    mean_shap_importance = np.ravel(mean_shap_importance)
+    
     shap_importance_df = pd.DataFrame({
         'feature': X.columns,
-        'mean_shap_value': mean_shap_importance
+        'mean_shap_value': mean_shap_importance.flatten()
     }).sort_values('mean_shap_value', ascending=False)
     shap_importance_df.to_csv(f'{output_prefix}_shap_importance.csv', index=False)
 
