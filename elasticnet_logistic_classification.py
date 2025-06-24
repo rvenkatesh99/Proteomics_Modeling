@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LogisticRegressionCV
+from scipy import interp  # or use np.interp
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
     accuracy_score, roc_auc_score, roc_curve, confusion_matrix, 
@@ -123,19 +124,48 @@ def run_elasticnet_classification(X, y, n_iter, output_prefix, test_size=0.2, ra
     plt.close()
 
     # ROC curves
+    # Interpolation setup
+    mean_fpr = np.linspace(0, 1, 100)
+    tprs = []
+    aucs = []
+
     plt.figure(figsize=(6, 5))
+
+    # Loop through predictions
     for i, metrics in enumerate(all_metrics):
         y_test = all_preds[i]['true_label'].values
         probas = all_preds[i]['predicted_proba'].values
         fpr, tpr, _ = roc_curve(y_test, probas)
-        plt.plot(fpr, tpr, label=f'Iter {i+1}')
+        
+        # Interpolate TPRs at common FPR points
+        interp_tpr = np.interp(mean_fpr, fpr, tpr)
+        interp_tpr[0] = 0.0
+        tprs.append(interp_tpr)
+        
+        auc = roc_auc_score(y_test, probas)
+        aucs.append(auc)
+
+    # Compute mean and std dev
+    tprs = np.array(tprs)
+    mean_tpr = tprs.mean(axis=0)
+    std_tpr = tprs.std(axis=0)
+    mean_auc = np.mean(aucs)
+    std_auc = np.std(aucs)
+
+    tpr_upper = np.minimum(mean_tpr + std_tpr, 1)
+    tpr_lower = np.maximum(mean_tpr - std_tpr, 0)
+
+    # Plot mean ROC and CI
+    plt.plot(mean_fpr, mean_tpr, color='blue', label=f'Mean ROC (AUC = {mean_auc:.2f} ± {std_auc:.2f})')
+    plt.fill_between(mean_fpr, tpr_lower, tpr_upper, color='blue', alpha=0.2, label='± 1 std. dev.')
     plt.plot([0, 1], [0, 1], 'k--', label='Chance')
+
     plt.xlabel('False Positive Rate')
     plt.ylabel('True Positive Rate')
-    plt.title('ROC Curves Across Iterations')
-    plt.legend()
+    plt.title('Summary ROC Curve with Confidence Interval')
+    plt.legend(loc='lower right')
     plt.tight_layout()
-    plt.savefig(f'{output_prefix}/roc_curves.png')
+    plt.savefig(f'{output_prefix}/roc_curves_summary.png')
     plt.close()
 
     print(f"✅ All results saved to: {output_prefix}")

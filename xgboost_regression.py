@@ -53,12 +53,14 @@ def run_xgboost_regression(X, y, n_iter, output_prefix, test_size=0.2, random_st
         }))
 
         r2 = r2_score(y_test, y_pred)
+        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
         mse = mean_squared_error(y_test, y_pred)
         mae = mean_absolute_error(y_test, y_pred)
 
         metrics.append({
             'iteration': i,
             'r2': r2,
+            'rmse': rmse,
             'mse': mse,
             'mae': mae
         })
