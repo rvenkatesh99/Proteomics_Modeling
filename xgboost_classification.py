@@ -20,24 +20,24 @@ from typing import Dict, Any
 def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
              X_val: np.ndarray, y_val: np.ndarray) -> float:
     params = {
-        'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
-        'max_depth': trial.suggest_int('max_depth', 3, 10),
-        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-        'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-        'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.6, 1.0),
-        'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
-        'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 10.0, log=True),
-        'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 10.0, log=True),
-        'gamma': trial.suggest_float('gamma', 1e-8, 1.0, log=True),
-        'scale_pos_weight': trial.suggest_float('scale_pos_weight', 0.1, 10.0),
+        'n_estimators': trial.suggest_int('n_estimators', 50, 200),
+        'max_depth': trial.suggest_int('max_depth', 3, 7),
+        'learning_rate': trial.suggest_float('learning_rate', 0.03, 0.2, log=True),
+        'subsample': trial.suggest_float('subsample', 0.7, 1.0),
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 1.0),
+        'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.7, 1.0),
+        'min_child_weight': trial.suggest_int('min_child_weight', 1, 6),
+        'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 1.0, log=True),
+        'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 1.0, log=True),
+        'gamma': trial.suggest_float('gamma', 1e-8, 0.5, log=True),
+        'scale_pos_weight': trial.suggest_float('scale_pos_weight', 0.5, 5.0),
         'random_state': 42
     }
     
     model = xgb.XGBClassifier(
         objective='binary:logistic',
         eval_metric='auc',
-        early_stopping_rounds=50,
+        early_stopping_rounds=10,
         verbosity=0,
         **params
     )
@@ -52,7 +52,7 @@ def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
     return -roc_auc_score(y_val, model.predict_proba(X_val)[:, 1])
 
 
-def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, random_state=42, n_trials=50):
+def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, random_state=42, n_trials=10):
     metrics = []
     predictions_list = []
     feature_importances = pd.DataFrame(index=X.columns)
@@ -85,9 +85,10 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
         final_model = xgb.XGBClassifier(
             objective='binary:logistic',
             eval_metric='auc',
-            early_stopping_rounds=50,
+            early_stopping_rounds=10,
             verbosity=0,
             random_state=random_state + i,
+            n_jobs=-1,
             **best_params
         )
         
@@ -174,7 +175,8 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
         mean_shap_values,
         X_test,
         feature_names=X.columns,
-        show=False
+        show=False,
+        max_display=5
     )
     plt.title('SHAP Feature Importance Summary')
     plt.tight_layout()
@@ -182,7 +184,7 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
     plt.close()
 
     # Plot SHAP dependence plots for top features
-    top_features = shap_importance_df['feature'].head(5).tolist()
+    top_features = shap_importance_df['feature'].head(2).tolist()
     for feature in top_features:
         plt.figure(figsize=(8, 6))
         shap.dependence_plot(
@@ -315,4 +317,4 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
         'best_params': best_params_df
     }
 
-results = run_xgboost_classification(X, y, n_iter=10, output_prefix='xgboost_tuned', n_trials=50)
+results = run_xgboost_classification(X, y, n_iter=3, output_prefix='xgboost_tuned', n_trials=10)
