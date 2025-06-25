@@ -13,45 +13,105 @@ import xgboost as xgb
 import joblib
 import shap
 import seaborn as sns
+import optuna
+from typing import Dict, Any
 
 
-def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, random_state=42):
+def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
+             X_val: np.ndarray, y_val: np.ndarray) -> float:
+    params = {
+        'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
+        'max_depth': trial.suggest_int('max_depth', 3, 10),
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+        'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.6, 1.0),
+        'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
+        'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 10.0, log=True),
+        'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 10.0, log=True),
+        'gamma': trial.suggest_float('gamma', 1e-8, 1.0, log=True),
+        'scale_pos_weight': trial.suggest_float('scale_pos_weight', 0.1, 10.0),
+        'random_state': 42
+    }
+    
+    model = xgb.XGBClassifier(
+        objective='binary:logistic',
+        eval_metric='auc',
+        early_stopping_rounds=50,
+        verbosity=0,
+        **params
+    )
+    
+    model.fit(
+        X_train, y_train,
+        eval_set=[(X_val, y_val)],
+        verbose=False
+    )
+    
+    # Return negative AUROC for minimization
+    return -roc_auc_score(y_val, model.predict_proba(X_val)[:, 1])
+
+
+def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, random_state=42, n_trials=50):
     metrics = []
     predictions_list = []
     feature_importances = pd.DataFrame(index=X.columns)
     all_shap_values = []
     all_probabilities = []
+    all_best_params = []
 
     for i in range(n_iter):
         print(f'Iteration {i+1}/{n_iter}')
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=test_size, random_state=random_state + i, stratify=y
         )
-
-        model = xgb.XGBClassifier(
-            objective='binary:logistic',
-            n_estimators=100,
-            learning_rate=0.1,
-            max_depth=3,
-            random_state=random_state + i,
-            verbosity=0
+        
+        # Further split training data for validation
+        X_train_final, X_val, y_train_final, y_val = train_test_split(
+            X_train, y_train, test_size=0.2, random_state=random_state + i, stratify=y_train
         )
-        model.fit(X_train, y_train)
+
+        # Optimize hyperparameters
+        study = optuna.create_study(direction='minimize')
+        study.optimize(
+            lambda trial: objective(trial, X_train_final, y_train_final, X_val, y_val),
+            n_trials=n_trials
+        )
+        
+        best_params = study.best_params
+        all_best_params.append(best_params)
+        
+        # Train final model with best parameters
+        final_model = xgb.XGBClassifier(
+            objective='binary:logistic',
+            eval_metric='auc',
+            early_stopping_rounds=50,
+            verbosity=0,
+            random_state=random_state + i,
+            **best_params
+        )
+        
+        final_model.fit(
+            X_train, y_train,
+            eval_set=[(X_test, y_test)],
+            verbose=False
+        )
         
         # Calculate SHAP values
-        explainer = shap.TreeExplainer(model)
+        explainer = shap.TreeExplainer(final_model)
         shap_values = explainer.shap_values(X_test)
         all_shap_values.append(shap_values)
         
         # Save model
         joblib.dump({
-            'model': model,
-            'explainer': explainer
+            'model': final_model,
+            'explainer': explainer,
+            'best_params': best_params
         }, f'{output_prefix}_model_iter_{i+1}.joblib')
 
         # Get predictions and probabilities
-        y_pred = model.predict(X_test)
-        y_prob = model.predict_proba(X_test)[:, 1]
+        y_pred = final_model.predict(X_test)
+        y_prob = final_model.predict_proba(X_test)[:, 1]
         all_probabilities.append(y_prob)
 
         predictions_list.append(pd.DataFrame({
@@ -78,10 +138,11 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
             'recall': recall,
             'f1_score': f1,
             'balanced_accuracy': balanced_acc,
-            'brier_score': brier
+            'brier_score': brier,
+            **best_params
         })
 
-        feature_importances[f'iter_{i}'] = model.feature_importances_
+        feature_importances[f'iter_{i}'] = final_model.feature_importances_
 
     # Save predictions
     predictions_df = pd.concat(predictions_list)
@@ -93,6 +154,10 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
 
     # Save feature importances
     feature_importances.to_csv(f'{output_prefix}_feature_importance.csv')
+
+    # Save best parameters
+    best_params_df = pd.DataFrame(all_best_params)
+    best_params_df.to_csv(f'{output_prefix}_best_parameters.csv', index=False)
 
     # Calculate and save mean SHAP values
     mean_shap_values = np.mean(all_shap_values, axis=0)
@@ -231,6 +296,14 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
     plt.savefig(f'{output_prefix}_probability_distribution.png')
     plt.close()
 
+    # Plot hyperparameter importance
+    plt.figure(figsize=(12, 8))
+    optuna.visualization.matplotlib.plot_param_importances(study)
+    plt.title('Hyperparameter Importance')
+    plt.tight_layout()
+    plt.savefig(f'{output_prefix}_hyperparameter_importance.png')
+    plt.close()
+
     print("XGBoost classification completed. Results saved to:", output_prefix)
 
     return {
@@ -238,5 +311,8 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
         'predictions': predictions_df,
         'feature_importances': feature_importances,
         'shap_importance': shap_importance_df,
-        'summary': summary_df
+        'summary': summary_df,
+        'best_params': best_params_df
     }
+
+results = run_xgboost_classification(X, y, n_iter=10, output_prefix='xgboost_tuned', n_trials=50)
