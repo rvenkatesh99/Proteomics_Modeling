@@ -1,3 +1,4 @@
+# %load Proteomics_Modeling/xgboost_classification_bestshap.py
 import os
 import numpy as np
 import pandas as pd
@@ -6,8 +7,9 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
     roc_auc_score, average_precision_score, precision_score, recall_score, 
     f1_score, balanced_accuracy_score, brier_score_loss, confusion_matrix,
-    classification_report
+    classification_report, roc_curve
 )
+from scipy.interpolate import interp1d
 from scipy.stats import t
 import xgboost as xgb
 import joblib
@@ -129,6 +131,19 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
             **best_params
         })
         feature_importances[f'iter_{i}'] = final_model.feature_importances_
+        
+        # Plot hyperparameter importance
+        try:
+            plt.figure(figsize=(12, 8))
+            optuna.visualization.matplotlib.plot_param_importances(study)
+            plt.title('Hyperparameter Importance')
+            plt.tight_layout()
+            plt.savefig(f'{output_prefix}_hyperparameter_importance_iter_{i+1}.png')
+            plt.close()
+        except (ValueError, TypeError) as e:
+            print(f"Could not plot hyperparameter importance in iteration {i+1}: {e}")
+
+        
     # Save predictions
     predictions_df = pd.concat(predictions_list)
     predictions_df.to_csv(f'{output_prefix}_predictions.csv', index=False)
@@ -172,6 +187,46 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
     plt.grid(True)
     plt.savefig(f'{output_prefix}_auroc_plot.png')
     plt.close()
+    # === Optimized ROC Curve with Confidence Intervals ===
+    mean_fpr = np.linspace(0, 1, 100)
+    tprs = []
+    aucs = [m['auroc'] for m in metrics]  # Use previously computed AUROC values
+
+    for y_test, y_prob in zip(all_y_tests, all_probabilities):
+        y_test = np.asarray(y_test).ravel()
+        y_prob = np.asarray(y_prob).ravel()
+
+        fpr, tpr, _ = roc_curve(y_test, y_prob)
+
+        # Vectorized interpolation
+        interp_func = interp1d(fpr, tpr, kind='linear', bounds_error=False, fill_value=(0, 1))
+        interp_tpr = interp_func(mean_fpr)
+        interp_tpr[0] = 0.0
+        tprs.append(interp_tpr)
+
+    tprs = np.array(tprs)
+    mean_tpr = tprs.mean(axis=0)
+    std_tpr = tprs.std(axis=0)
+    mean_auc = np.mean(aucs)
+    std_auc = np.std(aucs)
+
+    tpr_upper = np.minimum(mean_tpr + std_tpr, 1)
+    tpr_lower = np.maximum(mean_tpr - std_tpr, 0)
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(mean_fpr, mean_tpr, color='blue',
+             label=f'Mean ROC (AUC = {mean_auc:.2f} ± {std_auc:.2f})')
+    plt.fill_between(mean_fpr, tpr_lower, tpr_upper, color='blue', alpha=0.2,
+                     label='± 1 std. dev.')
+    plt.plot([0, 1], [0, 1], 'k--', label='Chance')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('Mean ROC Curve with Confidence Interval (XGBoost)')
+    plt.legend(loc='lower right')
+    plt.tight_layout()
+    plt.savefig(f'{output_prefix}_roc_curves_summary.png')
+    plt.close()
+
     # Plot AUPRC across iterations
     auprc_values = metrics_df['auprc'].values
     mean_auprc = np.mean(auprc_values)
@@ -220,13 +275,6 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
     plt.tight_layout()
     plt.savefig(f'{output_prefix}_probability_distribution.png')
     plt.close()
-    # Plot hyperparameter importance
-    plt.figure(figsize=(12, 8))
-    optuna.visualization.matplotlib.plot_param_importances(study)
-    plt.title('Hyperparameter Importance')
-    plt.tight_layout()
-    plt.savefig(f'{output_prefix}_hyperparameter_importance.png')
-    plt.close()
     # --- SHAP analysis only for the best model ---
     best_model_idx = metrics_df['auroc'].idxmax()
     best_model = all_models[best_model_idx]
@@ -245,7 +293,7 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
         best_X_test,
         feature_names=X.columns,
         show=False,
-        max_display=5
+        max_display=20
     )
     plt.title('SHAP Feature Importance Summary (Best Model)')
     plt.tight_layout()
