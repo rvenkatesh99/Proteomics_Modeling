@@ -129,12 +129,19 @@ def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
             val_loss_class = classification_criterion(val_preds, y_val_tensor)
             val_loss = val_loss_recon + val_loss_class
             
-            # Report intermediate value for pruning
-            trial.report(val_loss.item(), epoch)
-            
-            # Prune if the trial is performing poorly
-            if trial.should_prune():
-                raise optuna.TrialPruned()
+            # Report intermediate value for pruning (with error handling)
+            try:
+                trial.report(val_loss.item(), epoch)
+                
+                # Prune if the trial is performing poorly (with error handling)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+            except AttributeError as e:
+                if "module 'numpy' has no attribute 'float'" in str(e):
+                    # Skip pruning for this trial due to NumPy compatibility issue
+                    pass
+                else:
+                    raise e
             
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -184,8 +191,18 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
         )
         
         # Optimize hyperparameters
-        pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10, interval_steps=1)
-        study = optuna.create_study(direction='minimize', pruner=pruner)
+        try:
+            # Try to use pruner with conservative settings
+            pruner = optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=20, interval_steps=2)
+            study = optuna.create_study(direction='minimize', pruner=pruner)
+        except Exception as e:
+            if "module 'numpy' has no attribute 'float'" in str(e):
+                # Fallback to no pruner if NumPy compatibility issue
+                print("Warning: Using fallback mode without pruner due to NumPy compatibility issue")
+                study = optuna.create_study(direction='minimize')
+            else:
+                raise e
+                
         study.optimize(
             lambda trial: objective(trial, X_train_final, y_train_final, X_val, y_val, device),
             n_trials=n_trials
@@ -248,6 +265,12 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
         with torch.no_grad():
             reconstructions, embeddings, probabilities = model(X_test_tensor)
             predictions = (probabilities > 0.5).float()
+            
+            # Debug: Check probability distribution for this iteration
+            prob_np = probabilities.cpu().numpy()
+            print(f"Iteration {i} - Probabilities: min={prob_np.min():.4f}, max={prob_np.max():.4f}, "
+                  f"mean={prob_np.mean():.4f}, std={prob_np.std():.4f}")
+            print(f"Iteration {i} - Predictions: {predictions.sum().item()}/{len(predictions)} positive")
             
             # Calculate metrics
             auroc = roc_auc_score(y_test_tensor.cpu().numpy(), probabilities.cpu().numpy())
