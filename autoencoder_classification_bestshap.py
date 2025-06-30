@@ -129,6 +129,13 @@ def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
             val_loss_class = classification_criterion(val_preds, y_val_tensor)
             val_loss = val_loss_recon + val_loss_class
             
+            # Report intermediate value for pruning
+            trial.report(val_loss.item(), epoch)
+            
+            # Prune if the trial is performing poorly
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+            
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
@@ -177,7 +184,8 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
         )
         
         # Optimize hyperparameters
-        study = optuna.create_study(direction='minimize')
+        pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10, interval_steps=1)
+        study = optuna.create_study(direction='minimize', pruner=pruner)
         study.optimize(
             lambda trial: objective(trial, X_train_final, y_train_final, X_val, y_val, device),
             n_trials=n_trials
@@ -258,6 +266,7 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
         all_X_tests.append(X_test)
         all_y_tests.append(y_test)
         all_X_test_scaled.append(X_test_scaled)
+        all_probabilities.append(probabilities.cpu().numpy())
         
         # Save model and parameters
         torch.save({
@@ -379,10 +388,10 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
     plt.plot([0, 1], [0, 1], 'k--', label='Chance')
     plt.xlabel('False Positive Rate')
     plt.ylabel('True Positive Rate')
-    plt.title('Mean ROC Curve with Confidence Interval (XGBoost)')
+    plt.title('Mean ROC Curve with Confidence Interval (Autoencoder)')
     plt.legend(loc='lower right')
     plt.tight_layout()
-    plt.savefig(f'{output_prefix}_roc_curves_summary.png')
+    plt.savefig(os.path.join(output_dir, 'roc_curves_summary.png'))
     plt.close()
     
     # Plot AUPRC across iterations
@@ -431,18 +440,46 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
     plt.savefig(os.path.join(output_dir, 'embeddings_pca.png'))
     plt.close()
     
-    # --- SHAP analysis only for the best model ---
+    # --- SHAP analysis only for the best model using DeepExplainer ---
     best_model_idx = metrics_df['auroc'].idxmax()
     best_model = all_models[best_model_idx]
     best_X_test_scaled = all_X_test_scaled[best_model_idx]
     
-    # Calculate SHAP values for best model only
-    background = shap.kmeans(best_X_test_scaled, 50)  # reduced background size
-    explainer = shap.KernelExplainer(
-        lambda x: best_model(torch.tensor(x, dtype=torch.float32).to(device))[2].cpu().detach().numpy(),
-        background
+    print("Calculating SHAP values using DeepExplainer...")
+    
+    # Create a wrapper class for the classifier part only (for DeepExplainer)
+    class ClassifierWrapper(nn.Module):
+        def __init__(self, autoencoder_model):
+            super(ClassifierWrapper, self).__init__()
+            self.autoencoder = autoencoder_model
+            
+        def forward(self, x):
+            # Only return the classification output
+            _, _, pred = self.autoencoder(x)
+            return pred.unsqueeze(1)  # Add dimension for DeepExplainer
+    
+    # Convert to tensor for DeepExplainer
+    best_X_test_tensor = torch.tensor(best_X_test_scaled, dtype=torch.float32).to(device)
+    
+    # Create wrapper model
+    classifier_model = ClassifierWrapper(best_model).to(device)
+    classifier_model.eval()
+    
+    # Use DeepExplainer for much faster SHAP calculation
+    # Use smaller background size for faster computation
+    background_size = min(50, len(best_X_test_scaled))
+    explainer = shap.DeepExplainer(
+        classifier_model,
+        best_X_test_tensor[:background_size]  # Use smaller background
     )
-    shap_values = explainer.shap_values(best_X_test_scaled)
+    
+    # Calculate SHAP values for a subset of test data for speed
+    test_subset_size = min(200, len(best_X_test_tensor))  # Limit test samples
+    shap_values = explainer.shap_values(best_X_test_tensor[:test_subset_size])
+    
+    # For DeepExplainer, we get a single array
+    if isinstance(shap_values, list):
+        shap_values = shap_values[0]  # Take the first element if it's a list
     
     # Calculate and save mean SHAP values
     mean_shap_importance = np.abs(shap_values).mean(axis=0)
@@ -456,7 +493,7 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
     plt.figure(figsize=(10, 6))
     shap.summary_plot(
         shap_values,
-        all_X_tests[best_model_idx],
+        all_X_tests[best_model_idx].iloc[:test_subset_size],  # Use same subset
         feature_names=X.columns,
         show=False,
         max_display=20 
