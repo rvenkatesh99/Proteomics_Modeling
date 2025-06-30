@@ -21,36 +21,67 @@ from typing import Dict, Any
 
 def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
              X_val: np.ndarray, y_val: np.ndarray) -> float:
+    """Optimized objective function with tuned hyperparameter ranges for faster convergence"""
+    
+    # Optimized hyperparameter ranges based on best parameters analysis
     params = {
-        'n_estimators': trial.suggest_int('n_estimators', 50, 200),
-        'max_depth': trial.suggest_int('max_depth', 3, 7),
-        'learning_rate': trial.suggest_float('learning_rate', 0.03, 0.2, log=True),
+        # Core parameters - optimized ranges
+        'n_estimators': trial.suggest_int('n_estimators', 50, 300),
+        'max_depth': trial.suggest_int('max_depth', 2, 8),
+        'learning_rate': trial.suggest_float('learning_rate', 0.03, 0.25, log=True),
+        
+        # Sampling parameters - optimized ranges
         'subsample': trial.suggest_float('subsample', 0.7, 1.0),
-        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 1.0),
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.8, 1.0),
         'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.7, 1.0),
-        'min_child_weight': trial.suggest_int('min_child_weight', 1, 6),
+        
+        # Regularization parameters - optimized for small values
+        'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
         'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 1.0, log=True),
         'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 1.0, log=True),
-        'gamma': trial.suggest_float('gamma', 1e-8, 0.5, log=True),
-        'scale_pos_weight': trial.suggest_float('scale_pos_weight', 0.5, 5.0),
-        'random_state': 42
+        'gamma': trial.suggest_float('gamma', 1e-8, 0.1, log=True),
+        
+        # Class imbalance handling
+        'scale_pos_weight': trial.suggest_float('scale_pos_weight', 0.5, 6.0),
+        
+        'random_state': 42,
+        'verbosity': 0
     }
-    model = xgb.XGBClassifier(
-        objective='binary:logistic',
-        eval_metric='auc',
-        early_stopping_rounds=10,
-        verbosity=0,
-        **params
-    )
-    model.fit(
-        X_train, y_train,
-        eval_set=[(X_val, y_val)],
-        verbose=False
-    )
-    return -roc_auc_score(y_val, model.predict_proba(X_val)[:, 1])
+    
+    try:
+        model = xgb.XGBClassifier(
+            objective='binary:logistic',
+            eval_metric='auc',
+            early_stopping_rounds=20,
+            **params
+        )
+        
+        # Fit with early stopping
+        model.fit(
+            X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            verbose=False
+        )
+        
+        # Get predictions
+        y_pred_proba = model.predict_proba(X_val)[:, 1]
+        
+        # Calculate AUROC
+        auroc = roc_auc_score(y_val, y_pred_proba)
+        
+        return -auroc  # Negative because we minimize
+        
+    except Exception as e:
+        print(f"Trial failed: {e}")
+        return 0.0
 
 
-def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, random_state=42, n_trials=10):
+def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, random_state=42, n_trials=50):
+    """Simplified XGBoost classification with optimized hyperparameters and stable results"""
+    
+    # Create output directory
+    os.makedirs(output_prefix, exist_ok=True)
+    
     metrics = []
     predictions_list = []
     feature_importances = pd.DataFrame(index=X.columns)
@@ -59,6 +90,10 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
     all_models = []
     all_X_tests = []
     all_y_tests = []
+    
+    # Calculate class imbalance ratio
+    class_ratio = y.value_counts(normalize=True)
+    print(f"Class distribution: {class_ratio}")
 
     for i in range(n_iter):
         print(f'Iteration {i+1}/{n_iter}')
@@ -70,18 +105,25 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
             X_train, y_train, test_size=0.2, random_state=random_state + i, stratify=y_train
         )
         # Optimize hyperparameters
-        study = optuna.create_study(direction='minimize')
+        print(f"Optimizing hyperparameters with {n_trials} trials...")
+        study = optuna.create_study(
+            direction='minimize',
+            sampler=optuna.samplers.TPESampler(seed=random_state + i)
+        )
         study.optimize(
             lambda trial: objective(trial, X_train_final, y_train_final, X_val, y_val),
             n_trials=n_trials
         )
         best_params = study.best_params
         all_best_params.append(best_params)
+        
+        print(f"Best trial AUROC: {-study.best_value:.4f}")
+        
         # Train final model with best parameters
         final_model = xgb.XGBClassifier(
             objective='binary:logistic',
             eval_metric='auc',
-            early_stopping_rounds=10,
+            early_stopping_rounds=20,
             verbosity=0,
             random_state=random_state + i,
             n_jobs=-1,
@@ -99,8 +141,9 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
         # Save model
         joblib.dump({
             'model': final_model,
-            'best_params': best_params
-        }, f'{output_prefix}_model_iter_{i+1}.joblib')
+            'best_params': best_params,
+            'feature_names': X.columns.tolist()
+        }, f'{output_prefix}/model_iter_{i+1}.joblib')
         # Get predictions and probabilities
         y_pred = final_model.predict(X_test)
         y_prob = final_model.predict_proba(X_test)[:, 1]
@@ -136,9 +179,9 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
         try:
             plt.figure(figsize=(12, 8))
             optuna.visualization.matplotlib.plot_param_importances(study)
-            plt.title('Hyperparameter Importance')
+            plt.title(f'Hyperparameter Importance - Iteration {i+1}')
             plt.tight_layout()
-            plt.savefig(f'{output_prefix}_hyperparameter_importance_iter_{i+1}.png')
+            plt.savefig(f'{output_prefix}/hyperparameter_importance_iter_{i+1}.png')
             plt.close()
         except (ValueError, TypeError) as e:
             print(f"Could not plot hyperparameter importance in iteration {i+1}: {e}")
@@ -146,15 +189,15 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
         
     # Save predictions
     predictions_df = pd.concat(predictions_list)
-    predictions_df.to_csv(f'{output_prefix}_predictions.csv', index=False)
+    predictions_df.to_csv(f'{output_prefix}/predictions.csv', index=False)
     # Save metrics
     metrics_df = pd.DataFrame(metrics)
-    metrics_df.to_csv(f'{output_prefix}_metrics.csv', index=False)
+    metrics_df.to_csv(f'{output_prefix}/metrics.csv', index=False)
     # Save feature importances
-    feature_importances.to_csv(f'{output_prefix}_feature_importance.csv')
+    feature_importances.to_csv(f'{output_prefix}/feature_importance.csv')
     # Save best parameters
     best_params_df = pd.DataFrame(all_best_params)
-    best_params_df.to_csv(f'{output_prefix}_best_parameters.csv', index=False)
+    best_params_df.to_csv(f'{output_prefix}/best_parameters.csv', index=False)
     # Calculate summary statistics
     summary = {}
     for metric in ['auroc', 'auprc', 'precision', 'recall', 'f1_score', 'balanced_accuracy', 'brier_score']:
@@ -169,7 +212,7 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
             '95%_CI_upper': ci_upper
         }
     summary_df = pd.DataFrame(summary).T
-    summary_df.to_csv(f'{output_prefix}_metrics_summary.csv')
+    summary_df.to_csv(f'{output_prefix}/metrics_summary.csv')
     # Plot AUROC across iterations with confidence intervals
     auroc_values = metrics_df['auroc'].values
     mean_auroc = np.mean(auroc_values)
@@ -185,7 +228,7 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
     plt.ylabel('AUROC Score')
     plt.legend()
     plt.grid(True)
-    plt.savefig(f'{output_prefix}_auroc_plot.png')
+    plt.savefig(f'{output_prefix}/auroc_plot.png')
     plt.close()
     # === Optimized ROC Curve with Confidence Intervals ===
     mean_fpr = np.linspace(0, 1, 100)
@@ -224,7 +267,7 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
     plt.title('Mean ROC Curve with Confidence Interval (XGBoost)')
     plt.legend(loc='lower right')
     plt.tight_layout()
-    plt.savefig(f'{output_prefix}_roc_curves_summary.png')
+    plt.savefig(f'{output_prefix}/roc_curves_summary.png')
     plt.close()
 
     # Plot AUPRC across iterations
@@ -242,7 +285,7 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
     plt.ylabel('AUPRC Score')
     plt.legend()
     plt.grid(True)
-    plt.savefig(f'{output_prefix}_auprc_plot.png')
+    plt.savefig(f'{output_prefix}/auprc_plot.png')
     plt.close()
     # Plot feature importance comparison
     plt.figure(figsize=(12, 6))
@@ -251,7 +294,7 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
     plt.title('Top 10 Features by XGBoost Importance')
     plt.xlabel('Mean Feature Importance')
     plt.tight_layout()
-    plt.savefig(f'{output_prefix}_feature_importance_plot.png')
+    plt.savefig(f'{output_prefix}/feature_importance_plot.png')
     plt.close()
     # Plot confusion matrix for the best iteration
     best_iter = metrics_df['auroc'].idxmax()
@@ -263,7 +306,7 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
     plt.ylabel('True Label')
     plt.xlabel('Predicted Label')
     plt.tight_layout()
-    plt.savefig(f'{output_prefix}_confusion_matrix.png')
+    plt.savefig(f'{output_prefix}/confusion_matrix.png')
     plt.close()
     # Plot probability distribution
     plt.figure(figsize=(10, 6))
@@ -273,20 +316,23 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
     plt.xlabel('Predicted Probability')
     plt.ylabel('Frequency')
     plt.tight_layout()
-    plt.savefig(f'{output_prefix}_probability_distribution.png')
+    plt.savefig(f'{output_prefix}/probability_distribution.png')
     plt.close()
     # --- SHAP analysis only for the best model ---
     best_model_idx = metrics_df['auroc'].idxmax()
     best_model = all_models[best_model_idx]
     best_X_test = all_X_tests[best_model_idx]
     best_y_test = all_y_tests[best_model_idx]
+    
+    print(f"Performing SHAP analysis on best model (iteration {best_model_idx})...")
+    
     explainer = shap.TreeExplainer(best_model)
     shap_values = explainer.shap_values(best_X_test)
     shap_importance_df = pd.DataFrame({
         'feature': X.columns,
         'mean_shap_value': np.abs(shap_values).mean(axis=0)
     }).sort_values('mean_shap_value', ascending=False)
-    shap_importance_df.to_csv(f'{output_prefix}_shap_importance.csv', index=False)
+    shap_importance_df.to_csv(f'{output_prefix}/shap_importance.csv', index=False)
     plt.figure(figsize=(10, 6))
     shap.summary_plot(
         shap_values,
@@ -297,7 +343,7 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
     )
     plt.title('SHAP Feature Importance Summary (Best Model)')
     plt.tight_layout()
-    plt.savefig(f'{output_prefix}_shap_summary.png')
+    plt.savefig(f'{output_prefix}/shap_summary.png')
     plt.close()
     top_features = shap_importance_df['feature'].head(2).tolist()
     for feature in top_features:
@@ -311,9 +357,14 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
         )
         plt.title(f'SHAP Dependence Plot for {feature} (Best Model)')
         plt.tight_layout()
-        plt.savefig(f'{output_prefix}_shap_dependence_{feature}.png')
+        plt.savefig(f'{output_prefix}/shap_dependence_{feature}.png')
         plt.close()
-    print("XGBoost classification completed. Results saved to:", output_prefix)
+    
+    print(f"✅ Improved XGBoost classification completed!")
+    print(f"Best model AUROC: {auroc_values[best_model_idx]:.4f}")
+    print(f"Mean AUROC: {mean_auroc:.4f} ± {std_auroc:.4f}")
+    print("Results saved to:", output_prefix)
+    
     return {
         'metrics': metrics_df,
         'predictions': predictions_df,
