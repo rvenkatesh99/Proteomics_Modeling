@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
-    confusion_matrix, classification_report, roc_auc_score
+    confusion_matrix, classification_report, roc_auc_score, roc_curve
 )
 from scipy.stats import t
 import xgboost as xgb
@@ -72,40 +72,25 @@ def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
 
 
 def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_state=42, n_trials=10):
-    """Run XGBoost multiclass classification with proper data handling"""
-    
-    # Create output directory
+    """Run XGBoost multiclass classification with per-class SHAP and metrics"""
     os.makedirs(output_prefix, exist_ok=True)
-    
-    # Validate and prepare data
     print("Validating input data...")
-    
-    # Convert to numpy arrays and ensure correct types
     X = np.asarray(X, dtype=np.float32)
     y = np.asarray(y, dtype=np.int32).ravel()
-    
-    # Check for NaN or infinite values
     if np.any(np.isnan(X)) or np.any(np.isinf(X)):
         print("Warning: Found NaN or infinite values in features. Replacing with 0.")
         X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-    
-    # Encode labels if they're not integers
     if not np.issubdtype(y.dtype, np.integer):
         print("Encoding labels to integers...")
         label_encoder = LabelEncoder()
         y = label_encoder.fit_transform(y)
-    
-    # Get unique classes for multiclass metrics
     unique_classes = np.unique(y)
     n_classes = len(unique_classes)
-    
     print(f"Data shape: X={X.shape}, y={y.shape}")
     print(f"Number of classes: {n_classes}")
     print(f"Class distribution: {np.bincount(y)}")
-    
     if n_classes < 2:
         raise ValueError("Need at least 2 classes for classification")
-    
     metrics = []
     predictions_list = []
     feature_importances = pd.DataFrame(index=X.columns if hasattr(X, 'columns') else range(X.shape[1]))
@@ -114,31 +99,24 @@ def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_st
     all_models = []
     all_X_tests = []
     all_y_tests = []
-
+    all_class_reports = []
+    all_roc_aucs = []
     for i in range(n_iter):
         print(f'Iteration {i+1}/{n_iter}')
-        
         try:
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y, test_size=test_size, random_state=random_state + i, stratify=y
             )
-            
-            # Further split training data for validation
             X_train_final, X_val, y_train_final, y_val = train_test_split(
                 X_train, y_train, test_size=0.2, random_state=random_state + i, stratify=y_train
             )
-
-            # Optimize hyperparameters
             study = optuna.create_study(direction='minimize')
             study.optimize(
                 lambda trial: objective(trial, X_train_final, y_train_final, X_val, y_val),
                 n_trials=n_trials
             )
-            
             best_params = study.best_params
             all_best_params.append(best_params)
-            
-            # Train final model with best parameters
             final_model = xgb.XGBClassifier(
                 objective='multi:softprob',
                 eval_metric='mlogloss',
@@ -148,37 +126,41 @@ def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_st
                 n_jobs=-1,
                 **best_params
             )
-            
             final_model.fit(
                 X_train, y_train,
                 eval_set=[(X_test, y_test)],
                 verbose=False
             )
-            
-            # Save model for possible SHAP analysis later
             all_models.append(final_model)
             all_X_tests.append(X_test)
             all_y_tests.append(y_test)
-            
-            # Save model
             joblib.dump({
                 'model': final_model,
                 'best_params': best_params,
                 'feature_names': X.columns.tolist() if hasattr(X, 'columns') else None
             }, f'{output_prefix}/model_iter_{i+1}.joblib')
-
-            # Get predictions and probabilities
             y_pred = final_model.predict(X_test)
             y_prob = final_model.predict_proba(X_test)
             all_probabilities.append(y_prob)
-
             predictions_list.append(pd.DataFrame({
                 'iteration': i,
                 'true': y_test,
                 'predicted': y_pred
             }))
-
-            # Calculate metrics
+            # Per-class metrics
+            class_report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
+            class_report_df = pd.DataFrame(class_report).T
+            class_report_df['iteration'] = i
+            all_class_reports.append(class_report_df)
+            # Per-class ROC AUC (one-vs-rest)
+            roc_aucs = {}
+            for c in unique_classes:
+                try:
+                    roc_aucs[c] = roc_auc_score((y_test == c).astype(int), y_prob[:, c])
+                except Exception as e:
+                    roc_aucs[c] = np.nan
+            all_roc_aucs.append({'iteration': i, **roc_aucs})
+            # Metrics summary
             accuracy = accuracy_score(y_test, y_pred)
             precision_macro = precision_score(y_test, y_pred, average='macro', zero_division=0)
             recall_macro = recall_score(y_test, y_pred, average='macro', zero_division=0)
@@ -186,8 +168,6 @@ def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_st
             precision_weighted = precision_score(y_test, y_pred, average='weighted', zero_division=0)
             recall_weighted = recall_score(y_test, y_pred, average='weighted', zero_division=0)
             f1_weighted = f1_score(y_test, y_pred, average='weighted', zero_division=0)
-            
-            # Calculate ROC AUC for multiclass (one-vs-rest)
             try:
                 if n_classes == 2:
                     roc_auc = roc_auc_score(y_test, y_prob[:, 1])
@@ -196,7 +176,6 @@ def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_st
             except Exception as e:
                 print(f"Warning: Could not calculate ROC AUC: {e}")
                 roc_auc = 0.0
-
             metrics.append({
                 'iteration': i,
                 'accuracy': accuracy,
@@ -209,33 +188,77 @@ def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_st
                 'roc_auc': roc_auc,
                 **best_params
             })
-
             feature_importances[f'iter_{i}'] = final_model.feature_importances_
-            
             print(f"Iteration {i+1} - Accuracy: {accuracy:.4f}, F1 Macro: {f1_macro:.4f}")
-            
+            # --- SHAP per class ---
+            explainer = shap.TreeExplainer(final_model)
+            shap_values = explainer.shap_values(X_test)
+            # Save mean absolute SHAP values for each class
+            if isinstance(shap_values, list):
+                for class_idx, class_shap in enumerate(shap_values):
+                    class_name = f'class_{class_idx}'
+                    mean_shap = np.abs(class_shap).mean(axis=0)
+                    shap_df = pd.DataFrame({
+                        'feature': X.columns if hasattr(X, 'columns') else range(X.shape[1]),
+                        'mean_shap_value': mean_shap
+                    }).sort_values('mean_shap_value', ascending=False)
+                    shap_df.to_csv(f'{output_prefix}/shap_importance_{class_name}_iter_{i+1}.csv', index=False)
+                    # SHAP summary plot for this class
+                    plt.figure(figsize=(10, 6))
+                    shap.summary_plot(
+                        class_shap, X_test,
+                        feature_names=X.columns if hasattr(X, 'columns') else None,
+                        show=False, max_display=10
+                    )
+                    plt.title(f'SHAP Summary - {class_name} (iter {i+1})')
+                    plt.tight_layout()
+                    plt.savefig(f'{output_prefix}/shap_summary_{class_name}_iter_{i+1}.png')
+                    plt.close()
+            else:
+                # Binary case
+                mean_shap = np.abs(shap_values).mean(axis=0)
+                shap_df = pd.DataFrame({
+                    'feature': X.columns if hasattr(X, 'columns') else range(X.shape[1]),
+                    'mean_shap_value': mean_shap
+                }).sort_values('mean_shap_value', ascending=False)
+                shap_df.to_csv(f'{output_prefix}/shap_importance_iter_{i+1}.csv', index=False)
+                plt.figure(figsize=(10, 6))
+                shap.summary_plot(
+                    shap_values, X_test,
+                    feature_names=X.columns if hasattr(X, 'columns') else None,
+                    show=False, max_display=10
+                )
+                plt.title(f'SHAP Summary (iter {i+1})')
+                plt.tight_layout()
+                plt.savefig(f'{output_prefix}/shap_summary_iter_{i+1}.png')
+                plt.close()
+            # --- Per-class confusion matrix ---
+            for c in unique_classes:
+                cm = confusion_matrix((y_test == c).astype(int), (y_pred == c).astype(int))
+                plt.figure(figsize=(4, 4))
+                sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+                plt.title(f'Confusion Matrix for class {c} (iter {i+1})')
+                plt.ylabel('True Label')
+                plt.xlabel('Predicted Label')
+                plt.tight_layout()
+                plt.savefig(f'{output_prefix}/confusion_matrix_class_{c}_iter_{i+1}.png')
+                plt.close()
         except Exception as e:
             print(f"Error in iteration {i+1}: {e}")
             continue
-
     if not metrics:
         raise ValueError("No successful iterations completed")
-    
-    # Save predictions
     predictions_df = pd.concat(predictions_list)
     predictions_df.to_csv(f'{output_prefix}/predictions.csv', index=False)
-
-    # Save metrics
     metrics_df = pd.DataFrame(metrics)
     metrics_df.to_csv(f'{output_prefix}/metrics.csv', index=False)
-
-    # Save feature importances
     feature_importances.to_csv(f'{output_prefix}/feature_importance.csv')
-
-    # Save best parameters
     best_params_df = pd.DataFrame(all_best_params)
     best_params_df.to_csv(f'{output_prefix}/best_parameters.csv', index=False)
-
+    # Save all per-class reports and ROC AUCs
+    all_class_reports_df = pd.concat(all_class_reports)
+    all_class_reports_df.to_csv(f'{output_prefix}/per_class_metrics.csv')
+    pd.DataFrame(all_roc_aucs).to_csv(f'{output_prefix}/per_class_roc_auc.csv', index=False)
     # Calculate summary statistics
     summary = {}
     for metric in ['accuracy', 'precision_macro', 'recall_macro', 'f1_macro', 
