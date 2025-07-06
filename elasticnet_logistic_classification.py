@@ -50,10 +50,21 @@ def run_elasticnet_classification(X, y, n_iter, output_prefix, test_size=0.2, ra
         preds = model.predict(X_test_scaled)
         probas = model.predict_proba(X_test_scaled)[:, 1]
 
-        # SHAP values
-        explainer = shap.LinearExplainer(model, X_train_scaled, feature_perturbation='interventional')
-        shap_values = explainer.shap_values(X_test_scaled)
-        all_shap_values.append(shap_values)
+        # Use a small background for SHAP
+        background = shap.sample(X_train, 100, random_state=42) if X_train.shape[0] > 100 else X_train
+
+        # Use LinearExplainer for ElasticNet
+        explainer = shap.LinearExplainer(model, background, feature_dependence="independent")
+
+        # Limit test samples for SHAP calculation
+        X_shap = X_test if X_test.shape[0] <= 100 else shap.sample(X_test, 100, random_state=42)
+
+        # Compute SHAP values
+        shap_values = explainer.shap_values(X_shap)
+
+        # Save SHAP values (no duplicates)
+        shap_df = pd.DataFrame(shap_values, columns=X_test.columns if hasattr(X_test, 'columns') else None)
+        shap_df.to_csv(f'{output_prefix}/shap_values_iter_{i+1}.csv', index=False)
 
         # Metrics
         metrics = {
