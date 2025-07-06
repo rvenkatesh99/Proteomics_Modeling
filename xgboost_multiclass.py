@@ -101,6 +101,12 @@ def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_st
     all_y_tests = []
     all_class_reports = []
     all_roc_aucs = []
+    # Remove duplicate columns before modeling
+    if hasattr(X, 'columns'):
+        dupes = X.columns[X.columns.duplicated()]
+        if len(dupes) > 0:
+            print("Duplicate columns found and removed:", list(dupes))
+            X = X.loc[:, ~X.columns.duplicated()]
     for i in range(n_iter):
         print(f'Iteration {i+1}/{n_iter}')
         try:
@@ -193,39 +199,46 @@ def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_st
             # --- SHAP per class ---
             explainer = shap.TreeExplainer(final_model)
             shap_values = explainer.shap_values(X_test)
+            # Always use a DataFrame with unique columns for SHAP
+            feature_names = X.columns if hasattr(X, 'columns') else [f'f{j}' for j in range(X.shape[1])]
+            X_test_df = pd.DataFrame(X_test, columns=feature_names)
             # Save mean absolute SHAP values for each class
             if isinstance(shap_values, list):
+                # Panel plot setup
+                fig, axes = plt.subplots(1, len(shap_values), figsize=(6*len(shap_values), 6), sharey=True)
+                if len(shap_values) == 1:
+                    axes = [axes]
                 for class_idx, class_shap in enumerate(shap_values):
                     class_name = f'class_{class_idx}'
                     mean_shap = np.abs(class_shap).mean(axis=0)
                     shap_df = pd.DataFrame({
-                        'feature': X.columns if hasattr(X, 'columns') else range(X.shape[1]),
+                        'feature': feature_names,
                         'mean_shap_value': mean_shap
                     }).sort_values('mean_shap_value', ascending=False)
                     shap_df.to_csv(f'{output_prefix}/shap_importance_{class_name}_iter_{i+1}.csv', index=False)
-                    # SHAP summary plot for this class
-                    plt.figure(figsize=(10, 6))
+                    # SHAP summary plot for this class (panel)
+                    plt.sca(axes[class_idx])
                     shap.summary_plot(
-                        class_shap, X_test,
-                        feature_names=X.columns if hasattr(X, 'columns') else None,
+                        class_shap, X_test_df,
+                        feature_names=feature_names,
                         show=False, max_display=10
                     )
-                    plt.title(f'SHAP Summary - {class_name} (iter {i+1})')
-                    plt.tight_layout()
-                    plt.savefig(f'{output_prefix}/shap_summary_{class_name}_iter_{i+1}.png')
-                    plt.close()
+                    axes[class_idx].set_title(f'SHAP Summary - {class_name} (iter {i+1})')
+                plt.tight_layout()
+                plt.savefig(f'{output_prefix}/shap_panel_iter_{i+1}.png')
+                plt.close()
             else:
                 # Binary case
                 mean_shap = np.abs(shap_values).mean(axis=0)
                 shap_df = pd.DataFrame({
-                    'feature': X.columns if hasattr(X, 'columns') else range(X.shape[1]),
+                    'feature': feature_names,
                     'mean_shap_value': mean_shap
                 }).sort_values('mean_shap_value', ascending=False)
                 shap_df.to_csv(f'{output_prefix}/shap_importance_iter_{i+1}.csv', index=False)
                 plt.figure(figsize=(10, 6))
                 shap.summary_plot(
-                    shap_values, X_test,
-                    feature_names=X.columns if hasattr(X, 'columns') else None,
+                    shap_values, X_test_df,
+                    feature_names=feature_names,
                     show=False, max_display=10
                 )
                 plt.title(f'SHAP Summary (iter {i+1})')
@@ -350,6 +363,48 @@ def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_st
     plt.xticks(range(len(class_counts)), unique_classes)
     plt.tight_layout()
     plt.savefig(f'{output_prefix}/class_distribution.png')
+    plt.close()
+
+    # Plot summary ROC curves with confidence intervals
+    mean_fpr = np.linspace(0, 1, 100)
+    class_tprs = {c: [] for c in unique_classes}
+    class_aucs = {c: [] for c in unique_classes}
+
+    for i in range(n_iter):
+        y_test = all_y_tests[i]
+        y_prob = all_probabilities[i]
+        for c in unique_classes:
+            # One-vs-rest binary labels
+            y_true_bin = (y_test == c).astype(int)
+            y_score = y_prob[:, c]
+            fpr, tpr, _ = roc_curve(y_true_bin, y_score)
+            interp_tpr = np.interp(mean_fpr, fpr, tpr)
+            interp_tpr[0] = 0.0
+            class_tprs[c].append(interp_tpr)
+            try:
+                auc = roc_auc_score(y_true_bin, y_score)
+            except Exception:
+                auc = np.nan
+            class_aucs[c].append(auc)
+
+    plt.figure(figsize=(8, 6))
+    for c in unique_classes:
+        tprs = np.array(class_tprs[c])
+        mean_tpr = tprs.mean(axis=0)
+        std_tpr = tprs.std(axis=0)
+        mean_auc = np.nanmean(class_aucs[c])
+        std_auc = np.nanstd(class_aucs[c])
+        tpr_upper = np.minimum(mean_tpr + std_tpr, 1)
+        tpr_lower = np.maximum(mean_tpr - std_tpr, 0)
+        plt.plot(mean_fpr, mean_tpr, label=f'Class {c} (AUC = {mean_auc:.2f} ± {std_auc:.2f})')
+        plt.fill_between(mean_fpr, tpr_lower, tpr_upper, alpha=0.2)
+    plt.plot([0, 1], [0, 1], 'k--', label='Chance')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('Summary ROC Curves with Confidence Intervals (One-vs-Rest)')
+    plt.legend(loc='lower right')
+    plt.tight_layout()
+    plt.savefig(f'{output_prefix}/roc_curves_summary_multiclass.png')
     plt.close()
 
     print(f"✅ XGBoost multiclass classification completed!")
