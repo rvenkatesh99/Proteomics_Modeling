@@ -20,7 +20,10 @@ def run_elasticnet_classification(X, y, n_iter, output_prefix, test_size=0.2, ra
     all_metrics = []
     all_preds = []
     all_feature_importances = pd.DataFrame(index=feature_names)
-    all_shap_values = []
+    all_models = []
+    all_X_tests = []
+    all_y_tests = []
+    all_scalers = []
 
     os.makedirs(output_prefix, exist_ok=True)
 
@@ -50,22 +53,6 @@ def run_elasticnet_classification(X, y, n_iter, output_prefix, test_size=0.2, ra
         preds = model.predict(X_test_scaled)
         probas = model.predict_proba(X_test_scaled)[:, 1]
 
-        # Use a small background for SHAP
-        background = shap.sample(X_train, 100, random_state=42) if X_train.shape[0] > 100 else X_train
-
-        # Use LinearExplainer for ElasticNet
-        explainer = shap.LinearExplainer(model, background, feature_dependence="independent")
-
-        # Limit test samples for SHAP calculation
-        X_shap = X_test if X_test.shape[0] <= 100 else shap.sample(X_test, 100, random_state=42)
-
-        # Compute SHAP values
-        shap_values = explainer.shap_values(X_shap)
-
-        # Save SHAP values (no duplicates)
-        shap_df = pd.DataFrame(shap_values, columns=X_test.columns if hasattr(X_test, 'columns') else None)
-        shap_df.to_csv(f'{output_prefix}/shap_values_iter_{i+1}.csv', index=False)
-
         # Metrics
         metrics = {
             'iteration': i,
@@ -92,6 +79,12 @@ def run_elasticnet_classification(X, y, n_iter, output_prefix, test_size=0.2, ra
 
         # Feature importances
         all_feature_importances[f'Iter_{i+1}'] = model.coef_.flatten()
+
+        # Save model and scaler for later SHAP
+        all_models.append(model)
+        all_X_tests.append(X_test)
+        all_y_tests.append(y_test)
+        all_scalers.append(scaler)
 
         # Save model
         joblib.dump({'model': model, 'scaler': scaler}, f'{output_prefix}/model_iter_{i+1}.joblib')
@@ -125,52 +118,53 @@ def run_elasticnet_classification(X, y, n_iter, output_prefix, test_size=0.2, ra
     })
     feature_stats.to_csv(f'{output_prefix}/feature_importances_mean_sd.csv')
 
-    # SHAP summary plot
-    mean_shap_values = np.mean(all_shap_values, axis=0)
+    # === SHAP only for the best model ===
+    best_iter = metrics_df['roc_auc'].idxmax()
+    best_model = all_models[best_iter]
+    best_X_test = all_X_tests[best_iter]
+    best_y_test = all_y_tests[best_iter]
+    best_scaler = all_scalers[best_iter]
+    best_X_test_scaled = best_scaler.transform(best_X_test)
+
+    # Use a small background for SHAP
+    background = shap.sample(best_X_test, 100, random_state=42) if best_X_test.shape[0] > 100 else best_X_test
+    explainer = shap.LinearExplainer(best_model, background, feature_dependence="independent")
+    X_shap = best_X_test if best_X_test.shape[0] <= 100 else shap.sample(best_X_test, 100, random_state=42)
+    X_shap_scaled = best_scaler.transform(X_shap)
+    shap_values = explainer.shap_values(X_shap_scaled)
+    shap_df = pd.DataFrame(shap_values, columns=feature_names)
+    shap_df.to_csv(f'{output_prefix}/best_shap_values.csv', index=False)
     plt.figure(figsize=(10, 6))
-    shap.summary_plot(mean_shap_values, X_test_scaled, feature_names=feature_names, show=False)
-    plt.title('SHAP Summary Plot')
+    shap.summary_plot(shap_values, X_shap_scaled, feature_names=feature_names, show=False)
+    plt.title('SHAP Summary Plot (Best Model)')
     plt.tight_layout()
-    plt.savefig(f'{output_prefix}/shap_summary.png')
+    plt.savefig(f'{output_prefix}/best_shap_summary.png')
     plt.close()
 
     # ROC curves
-    # Interpolation setup
     mean_fpr = np.linspace(0, 1, 100)
     tprs = []
     aucs = []
-
     plt.figure(figsize=(6, 5))
-
-    # Loop through predictions
     for i, metrics in enumerate(all_metrics):
         y_test = all_preds[i]['true_label'].values
         probas = all_preds[i]['predicted_proba'].values
         fpr, tpr, _ = roc_curve(y_test, probas)
-        
-        # Interpolate TPRs at common FPR points
         interp_tpr = np.interp(mean_fpr, fpr, tpr)
         interp_tpr[0] = 0.0
         tprs.append(interp_tpr)
-        
         auc = roc_auc_score(y_test, probas)
         aucs.append(auc)
-
-    # Compute mean and std dev
     tprs = np.array(tprs)
     mean_tpr = tprs.mean(axis=0)
     std_tpr = tprs.std(axis=0)
     mean_auc = np.mean(aucs)
     std_auc = np.std(aucs)
-
     tpr_upper = np.minimum(mean_tpr + std_tpr, 1)
     tpr_lower = np.maximum(mean_tpr - std_tpr, 0)
-
-    # Plot mean ROC and CI
     plt.plot(mean_fpr, mean_tpr, color='blue', label=f'Mean ROC (AUC = {mean_auc:.2f} ± {std_auc:.2f})')
     plt.fill_between(mean_fpr, tpr_lower, tpr_upper, color='blue', alpha=0.2, label='± 1 std. dev.')
     plt.plot([0, 1], [0, 1], 'k--', label='Chance')
-
     plt.xlabel('False Positive Rate')
     plt.ylabel('True Positive Rate')
     plt.title('Summary ROC Curve with Confidence Interval')
