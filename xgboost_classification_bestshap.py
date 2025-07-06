@@ -177,14 +177,80 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
         
         # Plot hyperparameter importance
         try:
-            plt.figure(figsize=(12, 8))
-            optuna.visualization.matplotlib.plot_param_importances(study)
-            plt.title(f'Hyperparameter Importance - Iteration {i+1}')
-            plt.tight_layout()
-            plt.savefig(f'{output_prefix}/hyperparameter_importance_iter_{i+1}.png')
-            plt.close()
-        except (ValueError, TypeError) as e:
+            # Check if study has enough trials and valid parameters
+            if len(study.trials) > 1:
+                print(f"Attempting to plot hyperparameter importance for {len(study.trials)} trials...")
+                
+                # Get parameter importance safely
+                param_importance = optuna.importance.get_param_importances(study)
+                print(f"Raw parameter importance: {param_importance}")
+                
+                # Filter out any problematic parameters
+                valid_params = {}
+                for param, importance in param_importance.items():
+                    if isinstance(importance, (int, float)) and not np.isnan(importance):
+                        valid_params[param] = importance
+                    else:
+                        print(f"Skipping invalid parameter {param}: {importance} (type: {type(importance)})")
+                
+                if valid_params:
+                    plt.figure(figsize=(12, 8))
+                    # Create manual bar plot instead of using optuna's plotting function
+                    params = list(valid_params.keys())
+                    importances = list(valid_params.values())
+                    
+                    # Sort by importance
+                    sorted_indices = np.argsort(importances)[::-1]
+                    params = [params[i] for i in sorted_indices]
+                    importances = [importances[i] for i in sorted_indices]
+                    
+                    plt.barh(range(len(params)), importances)
+                    plt.yticks(range(len(params)), params)
+                    plt.xlabel('Importance')
+                    plt.title(f'Hyperparameter Importance - Iteration {i+1}')
+                    plt.tight_layout()
+                    plt.savefig(f'{output_prefix}/hyperparameter_importance_iter_{i+1}.png')
+                    plt.close()
+                    print(f"Successfully saved hyperparameter importance plot for iteration {i+1}")
+                else:
+                    print(f"No valid parameter importance values found in iteration {i+1}")
+            else:
+                print(f"Not enough trials ({len(study.trials)}) to plot hyperparameter importance in iteration {i+1}")
+                
+        except Exception as e:
             print(f"Could not plot hyperparameter importance in iteration {i+1}: {e}")
+            print(f"Error type: {type(e)}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
+            
+            # Try alternative plotting method
+            try:
+                if len(study.trials) > 1:
+                    # Simple bar plot of best parameters
+                    best_params = study.best_params
+                    if best_params:
+                        plt.figure(figsize=(10, 6))
+                        param_names = list(best_params.keys())
+                        param_values = list(best_params.values())
+                        
+                        # Convert values to strings for display
+                        param_values_str = [str(v)[:10] + '...' if len(str(v)) > 10 else str(v) for v in param_values]
+                        
+                        plt.barh(range(len(param_names)), [1] * len(param_names))
+                        plt.yticks(range(len(param_names)), param_names)
+                        plt.xlabel('Best Value')
+                        plt.title(f'Best Parameters - Iteration {i+1}')
+                        
+                        # Add value labels
+                        for i_val, (name, val) in enumerate(zip(param_names, param_values_str)):
+                            plt.text(0.5, i_val, val, va='center', ha='center')
+                        
+                        plt.tight_layout()
+                        plt.savefig(f'{output_prefix}/best_parameters_iter_{i+1}.png')
+                        plt.close()
+                        print(f"Saved best parameters plot for iteration {i+1}")
+            except Exception as e2:
+                print(f"Alternative plotting also failed in iteration {i+1}: {e2}")
 
         
     # Save predictions
