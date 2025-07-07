@@ -1,4 +1,3 @@
-# %load Proteomics_Modeling/xgboost_classification_bestshap.py
 import os
 import numpy as np
 import pandas as pd
@@ -69,7 +68,7 @@ def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
         # Calculate AUROC
         auroc = roc_auc_score(y_val, y_pred_proba)
         
-        return -auroc  # Negative because we minimize
+        return auroc  # Negative because we minimize
         
     except Exception as e:
         print(f"Trial failed: {e}")
@@ -107,7 +106,7 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
         # Optimize hyperparameters
         print(f"Optimizing hyperparameters with {n_trials} trials...")
         study = optuna.create_study(
-            direction='minimize',
+            direction='maximize',
             sampler=optuna.samplers.TPESampler(seed=random_state + i)
         )
         study.optimize(
