@@ -1,3 +1,4 @@
+# %load Proteomics_Modeling/DL_classification_bestshap.py
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
@@ -80,9 +81,9 @@ def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
     criterion = nn.BCELoss()
     
     X_train_tensor = torch.tensor(X_train, dtype=torch.float32).to(device)
-    y_train_tensor = torch.tensor(y_train.reshape(-1, 1), dtype=torch.float32).to(device)
+    y_train_tensor = torch.tensor(y_train.values.reshape(-1, 1), dtype=torch.float32).to(device)
     X_val_tensor = torch.tensor(X_val, dtype=torch.float32).to(device)
-    y_val_tensor = torch.tensor(y_val.reshape(-1, 1), dtype=torch.float32).to(device)
+    y_val_tensor = torch.tensor(y_val.values.reshape(-1, 1), dtype=torch.float32).to(device)
     
     train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)  # larger batch size
@@ -290,7 +291,7 @@ def run_pytorch_classification(X, y, n_iter=5, output_prefix='torch_classificati
         # === Optimized ROC Curve with Confidence Intervals ===
     mean_fpr = np.linspace(0, 1, 100)
     tprs = []
-    aucs = [m['auroc'] for m in metrics]  # Use previously computed AUROC values
+    aucs = [m['auroc'] for m in all_metrics]  # Use previously computed AUROC values
 
     for y_test, y_prob in zip(all_y_tests, all_probabilities):
         y_test = np.asarray(y_test).ravel()
