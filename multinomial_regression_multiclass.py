@@ -23,50 +23,40 @@ from sklearn.model_selection import StratifiedShuffleSplit
 def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
              X_val: np.ndarray, y_val: np.ndarray) -> float:
     """Objective function for multinomial logistic regression optimization: maximize macro-averaged ROC AUC"""
-    
+    # Only allow solvers that support multi_class='multinomial'
+    penalty = trial.suggest_categorical('penalty', ['l1', 'l2', 'elasticnet'])
+    if penalty in ['l1', 'elasticnet']:
+        solver = 'saga'
+    else:  # l2
+        solver = trial.suggest_categorical('solver', ['lbfgs', 'saga', 'newton-cg', 'sag'])
     params = {
         'C': trial.suggest_float('C', 1e-4, 1e2, log=True),
-        'penalty': trial.suggest_categorical('penalty', ['l1', 'l2', 'elasticnet']),
-        'solver': trial.suggest_categorical('solver', ['liblinear', 'saga']),
+        'penalty': penalty,
+        'solver': solver,
         'max_iter': trial.suggest_int('max_iter', 100, 2000),
         'tol': trial.suggest_float('tol', 1e-5, 1e-2, log=True),
         'random_state': 42
     }
-    
-    # Adjust solver based on penalty
-    if params['penalty'] == 'elasticnet':
+    if penalty == 'elasticnet':
         params['l1_ratio'] = trial.suggest_float('l1_ratio', 0.1, 0.9)
-        params['solver'] = 'saga'
-    elif params['penalty'] == 'l1':
-        params['solver'] = 'liblinear'
-    else:  # l2
-        params['solver'] = trial.suggest_categorical('solver', ['liblinear', 'saga'])
-    
     try:
         X_train = np.asarray(X_train, dtype=np.float32)
         X_val = np.asarray(X_val, dtype=np.float32)
         y_train = np.asarray(y_train, dtype=np.int32).ravel()
         y_val = np.asarray(y_val, dtype=np.int32).ravel()
-        
         if X_train.size == 0 or X_val.size == 0:
             return 0.0
-        
         if len(np.unique(y_train)) < 2:
             return 0.0
-        
         model = LogisticRegression(
             multi_class='multinomial',
             class_weight='balanced',
             **params
         )
-        
         model.fit(X_train, y_train)
-        
-        # Maximize macro-averaged ROC AUC
         y_prob = model.predict_proba(X_val)
         auc = roc_auc_score(y_val, y_prob, multi_class='ovr', average='macro')
         return auc
-        
     except Exception as e:
         print(f"Trial failed: {e}")
         return 0.0
