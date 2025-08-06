@@ -1,4 +1,3 @@
-# %load Proteomics_Modeling/DL_classification_bestshap.py
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
@@ -66,13 +65,13 @@ class AdvancedClassifier(nn.Module):
 def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
              X_val: np.ndarray, y_val: np.ndarray, device: torch.device) -> float:
     params = {
-        'units_1': trial.suggest_int('units_1', 32, 128),  # reduced max
-        'units_2': trial.suggest_int('units_2', 16, 64),   # reduced max
-        'units_3': trial.suggest_int('units_3', 8, 32),    # reduced max
-        'dropout_1': trial.suggest_float('dropout_1', 0.1, 0.4),  # narrower range
-        'dropout_2': trial.suggest_float('dropout_2', 0.1, 0.4),  # narrower range
-        'dropout_3': trial.suggest_float('dropout_3', 0.1, 0.4),  # narrower range
-        'learning_rate': trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True),  # narrower range
+        'units_1': trial.suggest_int('units_1', 32, 128),
+        'units_2': trial.suggest_int('units_2', 16, 64),  
+        'units_3': trial.suggest_int('units_3', 8, 32),   
+        'dropout_1': trial.suggest_float('dropout_1', 0.1, 0.4),  
+        'dropout_2': trial.suggest_float('dropout_2', 0.1, 0.4), 
+        'dropout_3': trial.suggest_float('dropout_3', 0.1, 0.4), 
+        'learning_rate': trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True), 
         'use_third_layer': trial.suggest_categorical('use_third_layer', [True, False])
     }
     
@@ -92,7 +91,7 @@ def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
     patience = 5  # reduced patience
     patience_counter = 0
     
-    for epoch in range(50):  # reduced max epochs
+    for epoch in range(100):
         model.train()
         for xb, yb in train_loader:
             pred = model(xb)
@@ -117,10 +116,9 @@ def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
     
     return best_val_loss.item()
 
-def run_pytorch_classification(X, y, n_iter=5, output_prefix='torch_classification_output', test_size=0.2, random_state=42, n_trials=10):
+def run_pytorch_classification(X, y, n_iter=10, output_prefix='', test_size=0.2, random_state=42, n_trials=10):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Create output directory
     os.makedirs(output_prefix, exist_ok=True)
     model_dir = os.path.join(output_prefix, 'models')
     os.makedirs(model_dir, exist_ok=True)
@@ -139,14 +137,16 @@ def run_pytorch_classification(X, y, n_iter=5, output_prefix='torch_classificati
             X, y, test_size=test_size, random_state=random_state + i, stratify=y
         )
 
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-        
-        # Further split training data for validation
         X_train_final, X_val, y_train_final, y_val = train_test_split(
-            X_train_scaled, y_train, test_size=0.2, random_state=random_state + i, stratify=y_train
+            X_train, y_train, test_size=0.2, random_state=random_state + i, stratify=y_train
         )
+
+        # Scale
+        scaler = StandardScaler()
+        X_train_final_scaled = scaler.fit_transform(X_train_final)
+        X_val_scaled = scaler.transform(X_val)
+        X_test_scaled = scaler.transform(X_test)
+
         
         # Optimize hyperparameters
         study = optuna.create_study(direction='minimize')
@@ -205,13 +205,13 @@ def run_pytorch_classification(X, y, n_iter=5, output_prefix='torch_classificati
             predictions = (probabilities > 0.5).astype(int)
             all_probabilities.append(probabilities)
 
-        # Save model for possible SHAP analysis later
+        # Save model
         all_models.append(model)
         all_X_tests.append(X_test)
         all_y_tests.append(y_test)
         all_X_test_scaled.append(X_test_scaled)
         
-        # Save model and parameters
+        # Save parameters
         torch.save({
             'model_state_dict': model.state_dict(),
             'params': best_params
@@ -288,10 +288,9 @@ def run_pytorch_classification(X, y, n_iter=5, output_prefix='torch_classificati
     plt.savefig(os.path.join(output_prefix, 'auroc_plot.png'))
     plt.close()
 
-        # === Optimized ROC Curve with Confidence Intervals ===
     mean_fpr = np.linspace(0, 1, 100)
     tprs = []
-    aucs = [m['auroc'] for m in all_metrics]  # Use previously computed AUROC values
+    aucs = [m['auroc'] for m in all_metrics]
 
     for y_test, y_prob in zip(all_y_tests, all_probabilities):
         y_test = np.asarray(y_test).ravel()
@@ -361,20 +360,19 @@ def run_pytorch_classification(X, y, n_iter=5, output_prefix='torch_classificati
     plt.savefig(os.path.join(output_prefix, 'confusion_matrix.png'))
     plt.close()
     
-    # --- SHAP analysis only for the best model ---
+    # SHAP analysis only for the best model - Kernel Explainer (slow)
     best_model_idx = metrics_df['auroc'].idxmax()
     best_model = all_models[best_model_idx]
     best_X_test_scaled = all_X_test_scaled[best_model_idx]
     
-    # Calculate SHAP values for best model only
-    background = shap.kmeans(best_X_test_scaled, 50)  # reduced background size
+    background = shap.kmeans(best_X_test_scaled, 50)
     explainer = shap.KernelExplainer(
         lambda x: best_model(torch.tensor(x, dtype=torch.float32).to(device)).cpu().detach().numpy().flatten(),
         background
     )
     shap_values = explainer.shap_values(best_X_test_scaled)
     
-    # Calculate and save mean SHAP values
+    # Save mean SHAP values
     mean_shap_importance = np.abs(shap_values).mean(axis=0)
     shap_importance_df = pd.DataFrame({
         'feature': X.columns,
@@ -405,7 +403,7 @@ def run_pytorch_classification(X, y, n_iter=5, output_prefix='torch_classificati
     plt.savefig(os.path.join(output_prefix, 'top_shap_features.png'))
     plt.close()
     
-    print("✅ Deep Learning classification completed. Results saved to:", output_prefix)
+    print("Deep Learning classification completed. Results saved to:", output_prefix)
     print(f"Best model (iteration {best_iter}) AUROC: {auroc_values[best_iter]:.4f}")
     
     return {
@@ -415,6 +413,3 @@ def run_pytorch_classification(X, y, n_iter=5, output_prefix='torch_classificati
         'shap_importance': shap_importance_df,
         'best_iteration': best_iter
     }
-
-# Example usage:
-# results = run_pytorch_classification(X, y, n_iter=3, output_prefix='dl_fast', n_trials=10) 

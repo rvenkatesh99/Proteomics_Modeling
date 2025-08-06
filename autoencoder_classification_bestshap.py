@@ -76,18 +76,16 @@ class AdvancedAutoencoderClassifier(nn.Module):
 def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
              X_val: np.ndarray, y_val: np.ndarray, device: torch.device) -> float:
     params = {
-        'n_encoder_layers': trial.suggest_int('n_encoder_layers', 2, 3),  # reduced max layers
-        'n_decoder_layers': trial.suggest_int('n_decoder_layers', 2, 3),  # reduced max layers
-        'dropout_rate': trial.suggest_float('dropout_rate', 0.1, 0.4),    # narrower range
-        'learning_rate': trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True),  # narrower range
-        'classifier_units': trial.suggest_int('classifier_units', 16, 32)  # reduced max units
+        'n_encoder_layers': trial.suggest_int('n_encoder_layers', 2, 3),
+        'n_decoder_layers': trial.suggest_int('n_decoder_layers', 2, 3),
+        'dropout_rate': trial.suggest_float('dropout_rate', 0.1, 0.4), 
+        'learning_rate': trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True),
+        'classifier_units': trial.suggest_int('classifier_units', 16, 32)
     }
     
-    # Add encoder units with smaller ranges
+    # Add encoder + decoder units with smaller ranges
     for i in range(params['n_encoder_layers']):
         params[f'encoder_units_{i}'] = trial.suggest_int(f'encoder_units_{i}', 32, 128)  # reduced max
-    
-    # Add decoder units with smaller ranges
     for i in range(params['n_decoder_layers']):
         params[f'decoder_units_{i}'] = trial.suggest_int(f'decoder_units_{i}', 32, 128)  # reduced max
     
@@ -105,10 +103,10 @@ def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)  # larger batch size
     
     best_val_loss = float('inf')
-    patience = 5  # reduced patience
+    patience = 5
     patience_counter = 0
     
-    for epoch in range(50):  # reduced max epochs
+    for epoch in range(100):
         model.train()
         for batch in train_loader:
             inputs, targets = batch
@@ -129,16 +127,14 @@ def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
             val_loss_class = classification_criterion(val_preds, y_val_tensor)
             val_loss = val_loss_recon + val_loss_class
             
-            # Report intermediate value for pruning (with error handling)
             try:
                 trial.report(val_loss.item(), epoch)
                 
-                # Prune if the trial is performing poorly (with error handling)
+                # Prune if the trial is performing poorly
                 if trial.should_prune():
                     raise optuna.TrialPruned()
             except AttributeError as e:
                 if "module 'numpy' has no attribute 'float'" in str(e):
-                    # Skip pruning for this trial due to NumPy compatibility issue
                     pass
                 else:
                     raise e
@@ -154,7 +150,7 @@ def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
     
     return best_val_loss.item()
 
-def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="autoencoder_classification_results", random_state=42, n_trials=10):
+def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="", random_state=42, n_trials=10):
     os.makedirs(output_dir, exist_ok=True)
     model_dir = os.path.join(output_dir, 'models')
     os.makedirs(model_dir, exist_ok=True)
@@ -176,23 +172,22 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
     for i in range(n_iter):
         print(f'Iteration {i + 1}/{n_iter}')
         
-        # Split data
+        # split data
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=test_size, random_state=random_state + i, stratify=y
         )
-        
-        # Scale features
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-        
-        # Further split training data for validation
         X_train_final, X_val, y_train_final, y_val = train_test_split(
-            X_train_scaled, y_train, test_size=0.2, random_state=random_state + i, stratify=y_train
+            X_train, y_train, test_size=0.2, random_state=random_state + i, stratify=y_train
         )
-        
+
+        # Scale
+        scaler = StandardScaler()
+        X_train_final_scaled = scaler.fit_transform(X_train_final)
+        X_val_scaled = scaler.transform(X_val)
+        X_test_scaled = scaler.transform(X_test)
+
         # Optimize hyperparameters
         try:
-            # Try to use pruner with conservative settings
             pruner = optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=20, interval_steps=2)
             study = optuna.create_study(direction='minimize', pruner=pruner)
         except Exception as e:
@@ -266,7 +261,7 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
             reconstructions, embeddings, probabilities = model(X_test_tensor)
             predictions = (probabilities > 0.5).float()
             
-            # Debug: Check probability distribution for this iteration
+            # Check probability distribution per iter
             prob_np = probabilities.cpu().numpy()
             print(f"Iteration {i} - Probabilities: min={prob_np.min():.4f}, max={prob_np.max():.4f}, "
                   f"mean={prob_np.mean():.4f}, std={prob_np.std():.4f}")
@@ -284,14 +279,13 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
             mse_recon = mean_squared_error(X_test_scaled, reconstructions.cpu().numpy())
             anomaly_scores = np.mean((X_test_scaled - reconstructions.cpu().numpy())**2, axis=1)
         
-        # Save model for possible SHAP analysis later
+        # Save model
         all_models.append(model)
         all_X_tests.append(X_test)
         all_y_tests.append(y_test)
         all_X_test_scaled.append(X_test_scaled)
         all_probabilities.append(probabilities.cpu().numpy())
-        
-        # Save model and parameters
+
         torch.save({
             'model_state_dict': model.state_dict(),
             'params': best_params
@@ -341,7 +335,7 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
     embeddings_all_df = pd.concat(embeddings_all, ignore_index=True)
     embeddings_all_df.to_csv(os.path.join(output_dir, 'embeddings.csv'), index=False)
     
-    # Calculate summary statistics
+    # summary statistics
     summary = {}
     for metric in ['auroc', 'auprc', 'precision', 'recall', 'f1_score', 'balanced_accuracy', 'brier_score']:
         values = metrics_df[metric]
@@ -377,7 +371,6 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
     plt.savefig(os.path.join(output_dir, 'auroc_plot.png'))
     plt.close()
 
-        # === Optimized ROC Curve with Confidence Intervals ===
     mean_fpr = np.linspace(0, 1, 100)
     tprs = []
     aucs = [m['auroc'] for m in metrics]  # Use previously computed AUROC values
@@ -436,7 +429,7 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
     plt.savefig(os.path.join(output_dir, 'auprc_plot.png'))
     plt.close()
     
-    # Plot confusion matrix for the best iteration
+    # confusion matrix for the best iter
     best_iter = metrics_df['auroc'].idxmax()
     best_predictions = predictions_df[predictions_df['iteration'] == best_iter]
     cm = confusion_matrix(best_predictions['true'], best_predictions['predicted'])
@@ -450,27 +443,11 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
     plt.savefig(os.path.join(output_dir, 'confusion_matrix.png'))
     plt.close()
     
-    # Plot PCA visualization of embeddings
-    pca = PCA(n_components=2)
-    pca_result = pca.fit_transform(embeddings_all_df.drop(columns='iteration'))
-    plt.figure(figsize=(8, 6))
-    plt.scatter(pca_result[:, 0], pca_result[:, 1], c=embeddings_all_df['iteration'], cmap='viridis', s=10)
-    plt.colorbar(label='Iteration')
-    plt.title('PCA of Autoencoder Embeddings')
-    plt.xlabel('PC1')
-    plt.ylabel('PC2')
-    plt.grid(True)
-    plt.savefig(os.path.join(output_dir, 'embeddings_pca.png'))
-    plt.close()
-    
-    # --- SHAP analysis only for the best model using DeepExplainer ---
+    # SHAP analysis only for the best model using DeepExplainer
     best_model_idx = metrics_df['auroc'].idxmax()
     best_model = all_models[best_model_idx]
     best_X_test_scaled = all_X_test_scaled[best_model_idx]
     
-    print("Calculating SHAP values using DeepExplainer...")
-    
-    # Create a wrapper class for the classifier part only (for DeepExplainer)
     class ClassifierWrapper(nn.Module):
         def __init__(self, autoencoder_model):
             super(ClassifierWrapper, self).__init__()
@@ -484,25 +461,22 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
     # Convert to tensor for DeepExplainer
     best_X_test_tensor = torch.tensor(best_X_test_scaled, dtype=torch.float32).to(device)
     
-    # Create wrapper model
+    # Create wrapper
     classifier_model = ClassifierWrapper(best_model).to(device)
     classifier_model.eval()
     
-    # Use DeepExplainer for much faster SHAP calculation
-    # Use smaller background size for faster computation
+    # DeepExplainer for faster SHAP 
     background_size = min(50, len(best_X_test_scaled))
     explainer = shap.DeepExplainer(
         classifier_model,
         best_X_test_tensor[:background_size]  # Use smaller background
     )
     
-    # Calculate SHAP values for a subset of test data for speed
-    test_subset_size = min(200, len(best_X_test_tensor))  # Limit test samples
+    test_subset_size = min(200, len(best_X_test_tensor))
     shap_values = explainer.shap_values(best_X_test_tensor[:test_subset_size])
     
-    # For DeepExplainer, we get a single array
     if isinstance(shap_values, list):
-        shap_values = shap_values[0]  # Take the first element if it's a list
+        shap_values = shap_values[0]
     
     # Calculate and save mean SHAP values
     mean_shap_importance = np.abs(shap_values).mean(axis=0)
@@ -535,7 +509,7 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
     plt.savefig(os.path.join(output_dir, 'top_shap_features.png'))
     plt.close()
     
-    print("✅ Autoencoder classification completed. Results saved to:", output_dir)
+    print("Autoencoder classification completed. Results saved to:", output_dir)
     print(f"Best model (iteration {best_iter}) AUROC: {auroc_values[best_iter]:.4f}")
     
     return {
@@ -547,6 +521,3 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
         'embeddings': embeddings_all_df,
         'best_iteration': best_iter
     }
-
-# Example usage:
-results = run_autoencoder_classification(X, y, n_iter=3, output_dir="autoencoder_fast", n_trials=10) 
