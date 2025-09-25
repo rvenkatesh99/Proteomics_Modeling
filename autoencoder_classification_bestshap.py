@@ -184,6 +184,7 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
         # Scale features
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
+        X_val_scaled = scaler.transform(X_val)
         
         # Further split training data for validation
         X_train_final, X_val, y_train_final, y_val = train_test_split(
@@ -218,7 +219,8 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
         y_train_tensor = torch.tensor(y_train.values, dtype=torch.float32).to(device)
         X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32).to(device)
         y_test_tensor = torch.tensor(y_test.values, dtype=torch.float32).to(device)
-        
+        X_val_tensor = torch.tensor(X_val_scaled, dtype=torch.float32).to(device)
+        y_val_tensor = torch.tensor(y_val.values, dtype=torch.float32).to(device)
         train_loader = DataLoader(TensorDataset(X_train_tensor, y_train_tensor), batch_size=64, shuffle=True)
         
         # Training with early stopping
@@ -244,9 +246,9 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
             # Validation
             model.eval()
             with torch.no_grad():
-                val_outputs, _, val_preds = model(X_train_tensor)
-                val_loss_recon = reconstruction_criterion(val_outputs, X_train_tensor)
-                val_loss_class = classification_criterion(val_preds, y_train_tensor)
+                val_outputs, _, val_preds = model(X_val_tensor)
+                val_loss_recon = reconstruction_criterion(val_outputs, X_val_tensor)
+                val_loss_class = classification_criterion(val_preds, y_val_tensor)
                 val_loss = val_loss_recon + val_loss_class
                 
                 if val_loss < best_val_loss:
@@ -468,8 +470,6 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
     best_model = all_models[best_model_idx]
     best_X_test_scaled = all_X_test_scaled[best_model_idx]
     
-    print("Calculating SHAP values using DeepExplainer...")
-    
     # Create a wrapper class for the classifier part only (for DeepExplainer)
     class ClassifierWrapper(nn.Module):
         def __init__(self, autoencoder_model):
@@ -535,7 +535,7 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="au
     plt.savefig(os.path.join(output_dir, 'top_shap_features.png'))
     plt.close()
     
-    print("✅ Autoencoder classification completed. Results saved to:", output_dir)
+    print("Autoencoder classification results saved to:", output_dir)
     print(f"Best model (iteration {best_iter}) AUROC: {auroc_values[best_iter]:.4f}")
     
     return {
