@@ -22,7 +22,6 @@ from sklearn.model_selection import StratifiedShuffleSplit
 
 def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
              X_val: np.ndarray, y_val: np.ndarray) -> float:
-    """Objective function for multiclass XGBoost optimization: maximize macro-averaged ROC AUC"""
     params = {
         'n_estimators': trial.suggest_int('n_estimators', 50, 400),
         'max_depth': trial.suggest_int('max_depth', 3, 12),
@@ -57,7 +56,7 @@ def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
             eval_set=[(X_val, y_val)],
             verbose=False
         )
-        # Maximize macro-averaged ROC AUC
+        # Maximize macro-averaged AUROC
         y_prob = model.predict_proba(X_val)
         auc = roc_auc_score(y_val, y_prob, multi_class='ovr', average='macro')
         return auc
@@ -69,8 +68,7 @@ def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
 def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_state=42, n_trials=50):
     """Run XGBoost multiclass classification with SHAP-based feature selection and class balancing."""
     os.makedirs(output_prefix, exist_ok=True)
-    print("Validating input data...")
-    # Ensure X is a DataFrame with unique columns
+    # Ensure X has unique columns
     if not isinstance(X, pd.DataFrame):
         raise ValueError("X must be a pandas DataFrame with real feature names for SHAP to work.")
     if X.columns.duplicated().any():
@@ -89,28 +87,6 @@ def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_st
     if n_classes < 2:
         raise ValueError("Need at least 2 classes for classification")
 
-    # --- SHAP-based Feature Selection ---
-    print("Performing SHAP-based feature selection...")
-    sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=random_state)
-    train_idx, test_idx = next(sss.split(X, y))
-    X_train_fs, y_train_fs = X.iloc[train_idx], y[train_idx]
-    model_fs = xgb.XGBClassifier(objective='multi:softprob', eval_metric='mlogloss', random_state=random_state, class_weight='balanced')
-    model_fs.fit(X_train_fs, y_train_fs)
-    explainer_fs = shap.TreeExplainer(model_fs)
-    shap_values_fs = explainer_fs.shap_values(X_train_fs)
-    # For multiclass, sum mean(|shap|) across classes
-    if isinstance(shap_values_fs, list):
-        mean_abs_shap = np.sum([np.abs(sv).mean(axis=0) for sv in shap_values_fs], axis=0)
-    else:
-        mean_abs_shap = np.abs(shap_values_fs).mean(axis=0)
-    top_n = 30
-    top_idx = np.argsort(mean_abs_shap)[-top_n:][::-1]
-    top_features = X_train_fs.columns[top_idx]
-    print(f"Selected top {top_n} features: {list(top_features)}")
-    # Use only top features for the rest of the pipeline
-    X = X[top_features]
-    feature_names = X.columns
-
     metrics = []
     predictions_list = []
     feature_importances = pd.DataFrame(index=feature_names)
@@ -125,19 +101,17 @@ def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_st
     for i in range(n_iter):
         print(f'Iteration {i+1}/{n_iter}')
         try:
-            # Always split using DataFrames to preserve column names
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y, test_size=test_size, random_state=random_state + i, stratify=y
             )
             X_train = X_train.copy()
             X_test = X_test.copy()
-            # Further split training data for validation
             X_train_final, X_val, y_train_final, y_val = train_test_split(
                 X_train, y_train, test_size=0.2, random_state=random_state + i, stratify=y_train
             )
             X_train_final = X_train_final.copy()
             X_val = X_val.copy()
-            # Convert all columns to numeric (will error if not possible)
+            # Convert all columns to numeric
             X_train_final = X_train_final.apply(pd.to_numeric, errors='raise')
             X_val = X_val.apply(pd.to_numeric, errors='raise')
             X_test = X_test.apply(pd.to_numeric, errors='raise')
@@ -267,19 +241,17 @@ def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_st
             })
             feature_importances[f'iter_{i}'] = final_model.feature_importances_
             print(f"Iteration {i+1} - Accuracy: {accuracy:.4f}, F1 Macro: {f1_macro:.4f}")
-            # --- SHAP calculation using DMatrix for multiclass bug workaround ---
+            # SHAP calculation using DMatrix
             try:
-                # Always use DataFrame with real feature names for SHAP
                 X_test_df = X_test.copy()
                 print("X_test_df shape before SHAP explainer:", X_test_df.shape)
                 print("Model n_features_in_:", getattr(final_model, 'n_features_in_', 'NA'))
                 print("X_test_df columns:", X_test_df.columns)
-                # --- SHAP calculation using DMatrix for multiclass bug workaround ---
                 dtest = xgb.DMatrix(X_test_df, feature_names=final_model.get_booster().feature_names)
                 explainer = shap.TreeExplainer(final_model.get_booster())
                 shap_values = explainer.shap_values(dtest)
                 
-                # Store SHAP values and data for best iteration plotting later
+                # Store SHAP values and data for best iteration
                 all_shap_data.append({
                     'iteration': i,
                     'shap_values': shap_values,
@@ -355,44 +327,6 @@ def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_st
     summary_df = pd.DataFrame(summary).T
     summary_df.to_csv(f'{output_prefix}/metrics_summary.csv')
 
-    # Plot Accuracy across iterations with confidence intervals
-    accuracy_values = metrics_df['accuracy'].values
-    mean_accuracy = np.mean(accuracy_values)
-    std_accuracy = np.std(accuracy_values)
-    ci_upper = mean_accuracy + 1.96 * std_accuracy / np.sqrt(len(accuracy_values))
-    ci_lower = mean_accuracy - 1.96 * std_accuracy / np.sqrt(len(accuracy_values))
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(metrics_df['iteration'], accuracy_values, marker='o', label='Accuracy per iteration')
-    plt.axhline(mean_accuracy, color='green', linestyle='--', label='Mean Accuracy')
-    plt.fill_between(metrics_df['iteration'], ci_lower, ci_upper, color='green', alpha=0.2, label='95% CI')
-    plt.title('Accuracy Score over Iterations (XGBoost Multiclass)')
-    plt.xlabel('Iteration')
-    plt.ylabel('Accuracy Score')
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(f'{output_prefix}/accuracy_plot.png')
-    plt.close()
-
-    # Plot F1 Score across iterations
-    f1_values = metrics_df['f1_macro'].values
-    mean_f1 = np.mean(f1_values)
-    std_f1 = np.std(f1_values)
-    ci_upper = mean_f1 + 1.96 * std_f1 / np.sqrt(len(f1_values))
-    ci_lower = mean_f1 - 1.96 * std_f1 / np.sqrt(len(f1_values))
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(metrics_df['iteration'], f1_values, marker='s', label='F1 Score per iteration')
-    plt.axhline(mean_f1, color='blue', linestyle='--', label='Mean F1 Score')
-    plt.fill_between(metrics_df['iteration'], ci_lower, ci_upper, color='blue', alpha=0.2, label='95% CI')
-    plt.title('F1 Score over Iterations (XGBoost Multiclass)')
-    plt.xlabel('Iteration')
-    plt.ylabel('F1 Score')
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(f'{output_prefix}/f1_plot.png')
-    plt.close()
-
     # Plot feature importance comparison
     plt.figure(figsize=(12, 6))
     feature_importance_mean = feature_importances.mean(axis=1).sort_values(ascending=True)
@@ -430,7 +364,7 @@ def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_st
     plt.savefig(f'{output_prefix}/class_distribution.png')
     plt.close()
 
-    # --- SHAP plotting for best iteration only ---
+    # SHAP plotting - multiclass
     if all_shap_data:
         # Find best iteration by accuracy
         best_shap_data = max(all_shap_data, key=lambda x: x['accuracy'])
@@ -441,7 +375,6 @@ def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_st
         print(f"Creating SHAP plots for best iteration {best_iter + 1} (accuracy: {best_shap_data['accuracy']:.4f})")
         
         if isinstance(shap_values, list):
-            # Multiclass: arrange with 2 plots per row for readability
             n_classes = len(shap_values)
             ncols = 2
             nrows = (n_classes + 1) // 2
@@ -468,7 +401,6 @@ def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_st
                 axes[class_idx].set_title(f'SHAP Summary - {class_name} (Best Iteration {best_iter + 1})', fontsize=16)
                 axes[class_idx].tick_params(axis='both', which='major', labelsize=12)
 
-            # Hide any unused axes
             for j in range(class_idx + 1, len(axes)):
                 fig.delaxes(axes[j])
             plt.subplots_adjust(wspace=0.5, hspace=0.3)
@@ -548,6 +480,3 @@ def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_st
         'summary': summary_df,
         'best_params': best_params_df
     }
-
-# Example usage:
-# results = run_xgboost_multiclass(X, y, n_iter=10, output_prefix='xgboost_multiclass', n_trials=50) 

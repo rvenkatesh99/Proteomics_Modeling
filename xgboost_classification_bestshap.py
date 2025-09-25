@@ -20,29 +20,19 @@ from typing import Dict, Any
 
 def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
              X_val: np.ndarray, y_val: np.ndarray) -> float:
-    """Optimized objective function with tuned hyperparameter ranges for faster convergence"""
     
-    # Optimized hyperparameter ranges based on best parameters analysis
     params = {
-        # Core parameters - optimized ranges
         'n_estimators': trial.suggest_int('n_estimators', 50, 300),
         'max_depth': trial.suggest_int('max_depth', 2, 8),
         'learning_rate': trial.suggest_float('learning_rate', 0.03, 0.25, log=True),
-        
-        # Sampling parameters - optimized ranges
         'subsample': trial.suggest_float('subsample', 0.7, 1.0),
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.8, 1.0),
         'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.7, 1.0),
-        
-        # Regularization parameters - optimized for small values
         'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
         'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 1.0, log=True),
         'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 1.0, log=True),
         'gamma': trial.suggest_float('gamma', 1e-8, 0.1, log=True),
-        
-        # Class imbalance handling
         'scale_pos_weight': trial.suggest_float('scale_pos_weight', 0.5, 6.0),
-        
         'random_state': 42,
         'verbosity': 0
     }
@@ -62,13 +52,10 @@ def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
             verbose=False
         )
         
-        # Get predictions
         y_pred_proba = model.predict_proba(X_val)[:, 1]
-        
-        # Calculate AUROC
         auroc = roc_auc_score(y_val, y_pred_proba)
         
-        return auroc  # Negative because we minimize
+        return auroc
         
     except Exception as e:
         print(f"Trial failed: {e}")
@@ -78,7 +65,6 @@ def objective(trial: optuna.Trial, X_train: np.ndarray, y_train: np.ndarray,
 def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, random_state=42, n_trials=50):
     """Simplified XGBoost classification with optimized hyperparameters and stable results"""
     
-    # Create output directory
     os.makedirs(output_prefix, exist_ok=True)
     
     metrics = []
@@ -90,7 +76,7 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
     all_X_tests = []
     all_y_tests = []
     
-    # Calculate class imbalance ratio
+    # class imbalance ratio
     class_ratio = y.value_counts(normalize=True)
     print(f"Class distribution: {class_ratio}")
 
@@ -295,11 +281,9 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
     plt.grid(True)
     plt.savefig(f'{output_prefix}/auroc_plot.png')
     plt.close()
-    # === Optimized ROC Curve with Confidence Intervals ===
     mean_fpr = np.linspace(0, 1, 100)
     tprs = []
-    aucs = [m['auroc'] for m in metrics]  # Use previously computed AUROC values
-
+    aucs = [m['auroc'] for m in metrics] 
     for y_test, y_prob in zip(all_y_tests, all_probabilities):
         y_test = np.asarray(y_test).ravel()
         y_prob = np.asarray(y_prob).ravel()
@@ -383,13 +367,14 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
     plt.tight_layout()
     plt.savefig(f'{output_prefix}/probability_distribution.png')
     plt.close()
-    # --- SHAP analysis only for the best model ---
+    
+    # SHAP analysis - TreeExplainer
     best_model_idx = metrics_df['auroc'].idxmax()
     best_model = all_models[best_model_idx]
     best_X_test = all_X_tests[best_model_idx]
     best_y_test = all_y_tests[best_model_idx]
     
-    print(f"Performing SHAP analysis on best model (iteration {best_model_idx})...")
+    print(f"Performing SHAP analysis on best model (iteration {best_model_idx})")
     
     explainer = shap.TreeExplainer(best_model)
     shap_values = explainer.shap_values(best_X_test)
@@ -438,6 +423,3 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
         'summary': summary_df,
         'best_params': best_params_df
     }
-
-# Example usage:
-# results = run_xgboost_classification(X, y, n_iter=3, output_prefix='xgboost_tuned', n_trials=10) 
