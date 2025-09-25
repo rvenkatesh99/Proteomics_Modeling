@@ -176,23 +176,16 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="",
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=test_size, random_state=random_state + i, stratify=y
         )
-<<<<<<< HEAD
         
-        # Scale features
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-        X_val_scaled = scaler.transform(X_val)
         
         # Further split training data for validation
-=======
->>>>>>> b7302cc57c56a24a635f00b90a1134c87c805d56
         X_train_final, X_val, y_train_final, y_val = train_test_split(
             X_train, y_train, test_size=0.2, random_state=random_state + i, stratify=y_train
         )
 
         # Scale
         scaler = StandardScaler()
-        X_train_final_scaled = scaler.fit_transform(X_train_final)
+        X_train_scaled = scaler.fit_transform(X_train_final)
         X_val_scaled = scaler.transform(X_val)
         X_test_scaled = scaler.transform(X_test)
 
@@ -459,10 +452,7 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="",
     best_model = all_models[best_model_idx]
     best_X_test_scaled = all_X_test_scaled[best_model_idx]
     
-<<<<<<< HEAD
     # Create a wrapper class for the classifier part only (for DeepExplainer)
-=======
->>>>>>> b7302cc57c56a24a635f00b90a1134c87c805d56
     class ClassifierWrapper(nn.Module):
         def __init__(self, autoencoder_model):
             super(ClassifierWrapper, self).__init__()
@@ -524,11 +514,7 @@ def run_autoencoder_classification(X, y, n_iter=5, test_size=0.2, output_dir="",
     plt.savefig(os.path.join(output_dir, 'top_shap_features.png'))
     plt.close()
     
-<<<<<<< HEAD
     print("Autoencoder classification results saved to:", output_dir)
-=======
-    print("Autoencoder classification completed. Results saved to:", output_dir)
->>>>>>> b7302cc57c56a24a635f00b90a1134c87c805d56
     print(f"Best model (iteration {best_iter}) AUROC: {auroc_values[best_iter]:.4f}")
     
     return {
