@@ -468,7 +468,6 @@ def run_xgboost_multiclass(X, y, n_iter, output_prefix, test_size=0.2, random_st
     plt.savefig(f'{output_prefix}/roc_curves_summary_multiclass.png')
     plt.close()
 
-    print(f"✅ XGBoost multiclass classification completed!")
     print(f"Best model accuracy: {accuracy_values[best_iter]:.4f}")
     print(f"Mean accuracy: {mean_accuracy:.4f} ± {std_accuracy:.4f}")
     print("Results saved to:", output_prefix)
