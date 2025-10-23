@@ -173,7 +173,7 @@ def run_elasticnet_classification(X, y, n_iter, output_prefix, test_size=0.2, ra
     plt.savefig(f'{output_prefix}/roc_curves_summary.png')
     plt.close()
 
-    print(f"✅ All results saved to: {output_prefix}")
+    print(f"Results saved to: {output_prefix}")
     return {
         'metrics': metrics_df,
         'predictions': predictions_df,
