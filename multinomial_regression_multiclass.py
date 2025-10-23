@@ -552,7 +552,6 @@ def run_multinomial_regression_multiclass(X, y, n_iter, output_prefix, test_size
     plt.savefig(f'{output_prefix}/roc_curves_summary_multiclass.png')
     plt.close()
 
-    print(f"✅ Multinomial regression multiclass classification completed!")
     print(f"Best model accuracy: {accuracy_values[best_iter]:.4f}")
     print(f"Mean accuracy: {mean_accuracy:.4f} ± {std_accuracy:.4f}")
     print("Results saved to:", output_prefix)
@@ -564,6 +563,3 @@ def run_multinomial_regression_multiclass(X, y, n_iter, output_prefix, test_size
         'summary': summary_df,
         'best_params': best_params_df
     }
-
-# Example usage:
-# results = run_multinomial_regression_multiclass(X, y, n_iter=10, output_prefix='multinomial_regression_multiclass', n_trials=50) 
