@@ -410,7 +410,6 @@ def run_xgboost_classification(X, y, n_iter, output_prefix, test_size=0.2, rando
         plt.savefig(f'{output_prefix}/shap_dependence_{feature}.png')
         plt.close()
     
-    print(f"✅ Improved XGBoost classification completed!")
     print(f"Best model AUROC: {auroc_values[best_model_idx]:.4f}")
     print(f"Mean AUROC: {mean_auroc:.4f} ± {std_auroc:.4f}")
     print("Results saved to:", output_prefix)
